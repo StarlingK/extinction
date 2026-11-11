@@ -1,0 +1,128 @@
+﻿recomp_0001.c	loc_00021CD0	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00021CD0u); }
+recomp_0002.c	loc_00024A51	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00024A51u); }
+recomp_0002.c	loc_00025379	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00025379u); }
+recomp_0002.c	loc_00025679	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00025679u); }
+recomp_0002.c	loc_000256EF	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x000256EFu); }
+recomp_0002.c	loc_0002573C	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x0002573Cu); }
+recomp_0002.c	loc_00026960	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00026960u); }
+recomp_0002.c	loc_000269EE	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x000269EEu); }
+recomp_0002.c	loc_00026ACE	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00026ACEu); }
+recomp_0002.c	loc_00027500	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00027500u); }
+recomp_0002.c	loc_00027630	{ extern void avp_coop_rng_site(uint32_t); extern void avp_coop_fx_rng(int, uint32_t); avp_coop_rng_site(0xC0000000u | MEM32(esp)); avp_coop_fx_rng(1, MEM32(esp)); }
+recomp_0002.c	loc_00027630	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00027630u); }
+recomp_0002.c	loc_00027677	{ extern void avp_coop_fx_rng(int, uint32_t); avp_coop_fx_rng(0, 0); }
+recomp_0003.c	loc_0002D9F0	{ extern int avp_coop_take_move(uint32_t esp); if (avp_coop_take_move(esp)) { esp += 20; return; }
+recomp_0003.c	loc_0002DC85	{ extern int avp_coop_take_route(int kind, uint32_t obj, uint32_t msg); if (avp_coop_take_route(2, MEM32(esp + 0x58), esp + 0x24)) goto loc_0002DC92; }
+recomp_0003.c	loc_0002DCCA	{ extern int avp_coop_take_route(int kind, uint32_t obj, uint32_t msg); if (avp_coop_take_route(2, MEM32(esp + 0x58), ebx)) goto loc_0002DCD3; }
+recomp_0003.c	loc_0002DCFB	{ extern int avp_coop_take_route(int kind, uint32_t obj, uint32_t msg); if (avp_coop_take_route(3, esi, MEM32(esp + 0x5C))) goto loc_0002DD13; }
+recomp_0003.c	loc_00032AA0	{ extern int avp_coop_take_order(uint32_t unit, uint32_t msg); if (avp_coop_take_order(eax, MEM32(esp + 4))) { SET_LO8(eax, 1); esp += 8; return; }
+recomp_0003.c	loc_0003C1D5	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x0003C1D5u); }
+recomp_0003.c	loc_0003C222	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x0003C222u); }
+recomp_0003.c	loc_0003CCF1	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x0003CCF1u); }
+recomp_0004.c	loc_00042EE2	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00042EE2u); }
+recomp_0004.c	loc_00043B90	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00043B90u); }
+recomp_0006.c	loc_00058557	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00058557u); }
+recomp_0006.c	loc_0005872B	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x0005872Bu); }
+recomp_0006.c	loc_00058778	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00058778u); }
+recomp_0006.c	loc_0005D1E9	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x0005D1E9u); }
+recomp_0006.c	loc_0005FCB3	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x0005FCB3u); }
+recomp_0010.c	loc_00086075	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00086075u); }
+recomp_0010.c	loc_000860D0	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x000860D0u); }
+recomp_0012.c	loc_0009AA63	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x0009AA63u); }
+recomp_0017.c	loc_000CAA64	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x000CAA64u); }
+recomp_0017.c	loc_000CAB8C	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x000CAB8Cu); }
+recomp_0017.c	loc_000CABFD	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x000CABFDu); }
+recomp_0017.c	loc_000CAD50	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x000CAD50u); }
+recomp_0017.c	loc_000CAEB1	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x000CAEB1u); }
+recomp_0017.c	loc_000CBD9D	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x000CBD9Du); }
+recomp_0017.c	loc_000CBFAC	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x000CBFACu); }
+recomp_0017.c	loc_000CC1A0	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x000CC1A0u); }
+recomp_0018.c	loc_000D72EB	{ extern void avp_coop_visit(uint32_t); avp_coop_visit(esi); }
+recomp_0020.c	loc_000E8A90	{ extern void avp_mouse_frame(uint32_t); extern void avp_coop_input_begin(void); avp_coop_input_begin(); avp_mouse_frame(ecx); }
+recomp_0020.c	loc_000E8D2B	{ extern void avp_coop_input_end(void); avp_coop_input_end(); }
+recomp_0020.c	loc_000E8D3C	{ extern void avp_coop_input_end(void); avp_coop_input_end(); }
+recomp_0021.c	loc_000F0070	{ extern int avp_coop_may_select(uint32_t handle); if (!avp_coop_may_select(MEM32(esp + 8))) { esp += 12; return; }
+recomp_0021.c	loc_000F2A13	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x000F2A13u); }
+recomp_0021.c	loc_000F2AF5	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x000F2AF5u); }
+recomp_0021.c	loc_000F2B60	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x000F2B60u); }
+recomp_0021.c	loc_000F32F0	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x000F32F0u); }
+recomp_0021.c	loc_000F33EC	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x000F33ECu); }
+recomp_0021.c	loc_000F34BF	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x000F34BFu); }
+recomp_0021.c	loc_000F3520	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x000F3520u); }
+recomp_0021.c	loc_000F3C71	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x000F3C71u); }
+recomp_0021.c	loc_000F4539	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x000F4539u); }
+recomp_0021.c	loc_000F4666	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x000F4666u); }
+recomp_0021.c	loc_000F4780	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x000F4780u); }
+recomp_0021.c	loc_000FE2D8	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x000FE2D8u); }
+recomp_0021.c	loc_000FF92C	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x000FF92Cu); }
+recomp_0021.c	loc_001000D0	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x001000D0u); }
+recomp_0021.c	loc_0010011E	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x0010011Eu); }
+recomp_0021.c	loc_00100175	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00100175u); }
+recomp_0021.c	loc_001001CC	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x001001CCu); }
+recomp_0021.c	loc_00100223	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00100223u); }
+recomp_0021.c	loc_0010027A	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x0010027Au); }
+recomp_0021.c	loc_001002D1	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x001002D1u); }
+recomp_0021.c	loc_00100328	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00100328u); }
+recomp_0021.c	loc_0010037F	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x0010037Fu); }
+recomp_0021.c	loc_001003D6	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x001003D6u); }
+recomp_0021.c	loc_00100580	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00100580u); }
+recomp_0021.c	loc_001005C8	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x001005C8u); }
+recomp_0021.c	loc_0010062A	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x0010062Au); }
+recomp_0021.c	loc_00105B50	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00105B50u); }
+recomp_0021.c	loc_00105BF2	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00105BF2u); }
+recomp_0021.c	loc_0010654E	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x0010654Eu); }
+recomp_0021.c	loc_00106594	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00106594u); }
+recomp_0021.c	loc_0010663D	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x0010663Du); }
+recomp_0021.c	loc_00106860	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00106860u); }
+recomp_0021.c	loc_00106A28	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00106A28u); }
+recomp_0021.c	loc_001081A0	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x001081A0u); }
+recomp_0021.c	loc_001081EE	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x001081EEu); }
+recomp_0021.c	loc_00108244	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00108244u); }
+recomp_0021.c	loc_001082B4	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x001082B4u); }
+recomp_0021.c	loc_001082FC	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x001082FCu); }
+recomp_0022.c	loc_001085DF	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x001085DFu); }
+recomp_0022.c	loc_001085DF	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x001085DFu); }
+recomp_0022.c	loc_0010869F	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x0010869Fu); }
+recomp_0022.c	loc_0010869F	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x0010869Fu); }
+recomp_0022.c	loc_00108761	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00108761u); }
+recomp_0022.c	loc_00108761	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00108761u); }
+recomp_0022.c	loc_00108823	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00108823u); }
+recomp_0022.c	loc_00108823	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00108823u); }
+recomp_0022.c	loc_00108920	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00108920u); }
+recomp_0022.c	loc_00108920	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00108920u); }
+recomp_0022.c	loc_00108BE6	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00108BE6u); }
+recomp_0022.c	loc_00109BF0	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00109BF0u); }
+recomp_0022.c	loc_00109C34	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00109C34u); }
+recomp_0022.c	loc_00109D22	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00109D22u); }
+recomp_0022.c	loc_0010C490	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x0010C490u); }
+recomp_0022.c	loc_0010C4EC	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x0010C4ECu); }
+recomp_0022.c	loc_0010C560	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x0010C560u); }
+recomp_0022.c	loc_0010C5F5	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x0010C5F5u); }
+recomp_0022.c	loc_0010C65A	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x0010C65Au); }
+recomp_0022.c	loc_0010C6EE	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x0010C6EEu); }
+recomp_0022.c	loc_0010C754	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x0010C754u); }
+recomp_0022.c	loc_0010C81B	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x0010C81Bu); }
+recomp_0022.c	loc_0010C881	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x0010C881u); }
+recomp_0022.c	loc_0010C8E5	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x0010C8E5u); }
+recomp_0022.c	loc_0010CADE	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x0010CADEu); }
+recomp_0022.c	loc_0010F54E	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x0010F54Eu); }
+recomp_0022.c	loc_0010FB98	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x0010FB98u); }
+recomp_0022.c	loc_0010FC60	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x0010FC60u); }
+recomp_0022.c	loc_001104E6	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x001104E6u); }
+recomp_0022.c	loc_00110CFC	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00110CFCu); }
+recomp_0022.c	loc_00110E28	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00110E28u); }
+recomp_0022.c	loc_00110F38	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00110F38u); }
+recomp_0022.c	loc_00112416	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00112416u); }
+recomp_0022.c	loc_00112520	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00112520u); }
+recomp_0022.c	loc_0011256D	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x0011256Du); }
+recomp_0022.c	loc_001125DE	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x001125DEu); }
+recomp_0022.c	loc_00112637	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00112637u); }
+recomp_0022.c	loc_0011275E	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x0011275Eu); }
+recomp_0022.c	loc_00114150	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00114150u); }
+recomp_0022.c	loc_00114374	{ extern void avp_coop_rng_site(uint32_t); avp_coop_rng_site(0x00114374u); }
+recomp_0022.c	loc_00115820	{ extern void avp_coop_fx_rng(int, uint32_t); avp_coop_fx_rng(1, MEM32(esp)); }
+recomp_0022.c	loc_00115A60	{ extern void avp_coop_fx_rng(int, uint32_t); avp_coop_fx_rng(0, 0); }
+recomp_0023.c	loc_00128A93	{ extern uint32_t avp_multisample_type(void); MEM32(0x2D04D8) = avp_multisample_type(); }
+recomp_0023.c	loc_0012E024	{ extern uint32_t avp_frame_target_bits(void); uint32_t _t = avp_frame_target_bits(); if (_t) MEM32(esp) = _t; }
+recomp_0041.c	loc_001D5F71	{ extern volatile uint32_t g_avp_xmv_obj; g_avp_xmv_obj = 0; }
+recomp_0041.c	loc_001D62C7	{ extern volatile uint32_t g_avp_xmv_obj; g_avp_xmv_obj = MEM32(esp + 4); }
