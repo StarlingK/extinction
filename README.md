@@ -3,7 +3,6 @@
 > This is an unofficial fan project. It is not affiliated with or endorsed by 20th Century Studios, Disney, Zono, Electronic Arts or Microsoft. *Aliens*, *Predator* and *Aliens versus Predator* are trademarks of their respective owners. You must provide your own dump of the Xbox version.
 
  - This project should run natively, it has Direct3D rendering. Mouse and Keyboard support as well as an as of now unfinished Co-Op Campaign.
- - The Launcher itself requires no python install or any setup required, it will install on the folder you place the launcher in.
 
  - Controls:
    Z or Left Click  select.
