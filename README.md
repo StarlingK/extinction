@@ -15,4 +15,3 @@
    Arrows keys, D-pad.
    Shift/Ctrl left and right stick click.
 
-> The current release is "playable" although it's missing some features like movement markers(draw_inline_array.); bugs like needing to double right click to carry or attack.
