@@ -1,4 +1,3 @@
-# Extinction
 # Aliens vs Predator: Extinction PC Port
 
 > This is an unofficial fan project. It is not affiliated with or endorsed by 20th Century Studios, Disney, Zono, Electronic Arts or Microsoft. *Aliens*, *Predator* and *Aliens versus Predator* are trademarks of their respective owners. You must provide your own dump of the Xbox version.
