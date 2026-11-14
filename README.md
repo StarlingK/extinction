@@ -5,8 +5,8 @@
  - This project should run natively, it has Direct3D rendering. Mouse and Keyboard support as well as an as of now unfinished Co-Op Campaign.
 
  - Controls:
-   Z or Left Click  select.
-   X or Right Click order.
+   Z or Left Click  select. 
+   X or Right Click order. / Shift Right Click attack move.
    E for context ability, holding 1 shows alternate context.
    Enter start.
    Backspace back.
