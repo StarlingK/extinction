@@ -1,6 +1,6 @@
 # Aliens vs Predator: Extinction PC Port
 
-## For those having issues installing this, it requires the USA Xbox release (VU-034).
+This requires the USA Xbox release (VU-034). This does not provide you with this release.
 
 > This is an unofficial fan project. It is not affiliated with or endorsed by 20th Century Studios, Disney, Zono, Electronic Arts or Microsoft. *Aliens*, *Predator* and *Aliens versus Predator* are trademarks of their respective owners. You must provide your own dump of the Xbox version.
 
