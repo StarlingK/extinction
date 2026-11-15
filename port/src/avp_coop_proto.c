@@ -289,16 +289,27 @@ uint32_t cp_pm_object(uint32_t slot)
     return pm;
 }
 
+int (*g_cp_hidden)(uint32_t handle);
+
+int cp_handle_usable(uint32_t handle)
+{
+    uint32_t obj = cp_obj_of(handle);
+    if (!obj) return 0;
+    if (G8(obj + 0x26Du)) return 0;
+    if (g_cp_hidden && g_cp_hidden(handle)) return 0;
+    return 1;
+}
+
 int cp_target_ok(uint32_t handle)
 {
     uint32_t obj = cp_obj_of(handle);
-    return obj && (cp_class(G32(obj)) & CF_AVP);
+    return obj && (cp_class(G32(obj)) & CF_AVP) && cp_handle_usable(handle);
 }
 
 int cp_unit_ok(uint32_t handle)
 {
     uint32_t obj = cp_obj_of(handle);
-    return obj && (cp_class(G32(obj)) & CF_UNIT) && !(cp_class(G32(obj)) & CF_STATIC);
+    return obj && (cp_class(G32(obj)) & CF_UNIT) && !(cp_class(G32(obj)) & CF_STATIC) && cp_handle_usable(handle);
 }
 
 typedef struct { uint32_t handle, flags; uint32_t w[CP_FIELDS_MAX]; } CpCache;
@@ -919,7 +930,7 @@ static void apply_globals(const uint8_t *p, uint32_t npm, uint32_t ntech, uint32
         *o += 136u;
         if (cp_obj_ok(mm) && rd32(w) < 8u && rd32(w + 4) <= 8u) {
             int ok = 1;
-            for (k = 0; k < 32u; k++) if (!finite_f(u2f(rd32(w + 8 + 4 * k)))) ok = 0;
+            for (k = 0; k < 32u; k++) if (!range_f(u2f(rd32(w + 8 + 4 * k)), 1.0e7f)) ok = 0;
             if (ok) {
                 G32(mm + 0x1020) = rd32(w);
                 G32(mm + 0x1024) = rd32(w + 4);
@@ -1019,8 +1030,15 @@ void cp_state_apply(const uint8_t *p, uint32_t len, const CpHooks *hk, CpApplySt
         }
     }
     for (i = 0; i < s_pend_n; i++) {
-        uint32_t lh = cp_map_to_client(s_pend[i].hh);
-        if (lh && cp_obj_ok(s_pend[i].obj)) G32(s_pend[i].obj + s_pend[i].off) = lh;
+        uint32_t lh = cp_map_to_client(s_pend[i].hh), at = s_pend[i].obj + s_pend[i].off;
+        if (!cp_obj_ok(s_pend[i].obj)) continue;
+        if (lh && !cp_handle_usable(lh)) lh = 0;
+        if (lh) {
+            G32(at) = lh;
+        } else {
+            uint32_t cur = G32(at);
+            if (cur && !cp_handle_usable(cur)) G32(at) = 0;
+        }
     }
     if ((flags & CP_FLAG_FULL) && !(flags & CP_FLAG_TRUNC)) {
         for (idx = 1; idx < 0x10000u; idx++) {

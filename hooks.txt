@@ -71,4 +71,5 @@ recomp_0005.c	loc_00053360	{ extern int avp_coop_tech2_pre(uint32_t self, uint32
 recomp_0025.c	loc_001474DA	{ extern int avp_rtti_bad(uint32_t esp); if (avp_rtti_bad(esp)) { eax = 0; esp += 4; return; } }
 recomp_0010.c	loc_0007F800	{ extern int avp_coop_mover_pre(uint32_t m); if (avp_coop_mover_pre(ecx)) { eax = 0; esp += 4; return; } }
 recomp_0010.c	loc_000802B0	{ extern int avp_coop_mover_pre(uint32_t m); if (avp_coop_mover_pre(ecx)) { eax = 0; esp += 4; return; } }
-recomp_0018.c	loc_000D7270	{ extern int avp_coop_parent_bad(uint32_t obj); if (avp_coop_parent_bad(ecx)) { esp += 4; return; } }
+recomp_0018.c	loc_000D7270	{ extern int avp_coop_parent_bad(uint32_t obj); if (avp_coop_parent_bad(ecx)) { eax = 0; esp += 4; return; } }
+recomp_0010.c	loc_0007F964	{ extern int avp_coop_mover_spin(uint32_t m); if (avp_coop_mover_spin(esi)) goto loc_0007F9C0; }

@@ -47,6 +47,8 @@ void recomp_icall_fail_log(uint32_t va)
     fflush(stderr);
 }
 
+extern void avp_coop_null_vcall(uint32_t self, uint32_t target);
+
 void recomp_icall_not_code_log(uint32_t va)
 {
     enum { SLOTS = 16 };
@@ -54,6 +56,8 @@ void recomp_icall_not_code_log(uint32_t va)
     static uint64_t hits[SLOTS];
     static int count;
     int i;
+
+    avp_coop_null_vcall((uint32_t)g_ecx, va);
 
     for (i = 0; i < count; i++)
         if (seen[i] == va)

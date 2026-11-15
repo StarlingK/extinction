@@ -143,7 +143,8 @@ static volatile int s_last_net_err;
 static volatile LONG s_netlog_n;
 static struct { ULONGLONG ms; int dir; uint32_t type, len; } s_netlog[32];
 static int s_local_input, s_executing, s_allow_death;
-static uint32_t s_kill_q[64];
+#define KILL_MAX 512
+static uint32_t s_kill_q[KILL_MAX];
 static int s_kill_n;
 static char s_my_map[8];
 
@@ -191,7 +192,7 @@ static int kill_queue(uint32_t h)
     int i;
     for (i = 0; i < s_kill_n; i++)
         if (s_kill_q[i] == h) return 1;
-    if (s_kill_n >= 64) return 0;
+    if (s_kill_n >= KILL_MAX) return 0;
     s_kill_q[s_kill_n++] = h;
     return 1;
 }
@@ -1281,27 +1282,77 @@ static void hk_setpos(uint32_t obj, const float *v)
     call_vec(obj, 22, v);
 }
 
-static uint32_t s_hidden[128];
+#define HIDDEN_MAX 512
+#define HIDE_FAR (-20000.0f)
+static struct { uint32_t h, obj, vt; } s_hidden[HIDDEN_MAX];
 static int s_hidden_n;
+
+static int hidden_live(int i)
+{
+    uint32_t obj = cp_obj_of(s_hidden[i].h);
+    return obj && obj == s_hidden[i].obj && G32(obj) == s_hidden[i].vt;
+}
+
+static void hidden_drop(int i)
+{
+    s_hidden[i] = s_hidden[--s_hidden_n];
+}
 
 static int is_hidden(uint32_t h)
 {
     int i;
     for (i = 0; i < s_hidden_n; i++)
-        if (s_hidden[i] == h) return 1;
+        if (s_hidden[i].h == h) {
+            if (hidden_live(i)) return 1;
+            hidden_drop(i);
+            return 0;
+        }
     return 0;
+}
+
+static int hidden_cb(uint32_t h)
+{
+    return is_hidden(h);
+}
+
+static uint32_t player_pointer(int player);
+static void run_deselect(int player, uint32_t h);
+
+static void hide_clear_refs(uint32_t obj)
+{
+    uint32_t fl = cp_class(G32(obj)), k;
+    if (!(fl & CF_UNIT)) return;
+    G32(obj + 0xDCu) = 0;
+    for (k = 0; k < 3; k++) G32(obj + 0x4A4u + 4u * k) = G32(CP_NOWHERE + 4u * k);
+    G32(obj + 0x4A0u) = 0;
+    G32(obj + 0x4B0u) = 0;
+    G32(obj + 0x4B4u) = 0;
+    G32(obj + 0x4B8u) = 0;
+    G8(obj + 0x4C8u) = 0;
 }
 
 static void hide_local(uint32_t h)
 {
     int i;
     uint32_t obj = cp_obj_of(h);
-    static const float far_away[3] = { -20000.0f, -20000.0f, -20000.0f };
+    static const float far_away[3] = { HIDE_FAR, HIDE_FAR, HIDE_FAR };
     if (!obj || G8(obj + 0x26Du)) return;
     for (i = 0; i < s_hidden_n; i++)
-        if (s_hidden[i] == h) return;
-    if (s_hidden_n < 128) s_hidden[s_hidden_n++] = h;
+        if (s_hidden[i].h == h && hidden_live(i)) return;
+    for (i = 0; i < s_hidden_n;)
+        if (hidden_live(i)) i++;
+        else hidden_drop(i);
+    if (s_hidden_n >= HIDDEN_MAX) {
+        static int told;
+        if (told++ < 3) fprintf(stderr, "[COOP] too many hidden local objects (%d), not hiding another one\n", HIDDEN_MAX);
+        return;
+    }
+    s_hidden[s_hidden_n].h = h;
+    s_hidden[s_hidden_n].obj = obj;
+    s_hidden[s_hidden_n].vt = G32(obj);
+    s_hidden_n++;
     unselect_everywhere(h);
+    hide_clear_refs(obj);
     hk_setpos(obj, far_away);
     {
         static int told;
@@ -1312,6 +1363,28 @@ static void hide_local(uint32_t h)
 static void hk_setrot(uint32_t obj, const float *v)
 {
     call_vec(obj, 23, v);
+}
+
+static void hidden_tick(void)
+{
+    static const float far_away[3] = { HIDE_FAR, HIDE_FAR, HIDE_FAR };
+    int i, pl;
+    for (i = 0; i < s_hidden_n;) {
+        uint32_t obj;
+        if (!hidden_live(i) || cp_map_to_host(s_hidden[i].h)) { hidden_drop(i); continue; }
+        obj = s_hidden[i].obj;
+        if (G8(obj + 0x26Du)) { i++; continue; }
+        if (!(GF(obj + 0x40u) < -10000.0f)) hk_setpos(obj, far_away);
+        if ((cp_class(G32(obj)) & CF_UNIT) && (G32(obj + 0xDCu) || G32(obj + 0x4A0u))) hide_clear_refs(obj);
+        i++;
+    }
+    for (pl = 0; pl < 2; pl++) {
+        uint32_t p = player_pointer(pl), sel[SEL_MAX], n, k;
+        if (!p) continue;
+        n = cp_read_selection(p, sel, SEL_MAX);
+        for (k = 0; k < n; k++)
+            if (is_hidden(sel[k])) run_deselect(pl, sel[k]);
+    }
 }
 
 static const CpHooks s_hooks = { hk_owner, hk_owner_set, hk_kill, hk_unmatched, hk_setpos, hk_setrot };
@@ -1393,16 +1466,25 @@ static int hostauth_block(void)
     return guest_live() && !s_allow_death;
 }
 
+static int host_driven_unit(uint32_t obj)
+{
+    uint32_t fl;
+    if (!cp_obj_ok(obj)) return 0;
+    fl = cp_class(G32(obj));
+    return (fl & CF_UNIT) && !(fl & CF_HELPER);
+}
+
 int avp_coop_block_death(uint32_t unit)
 {
-    (void)unit;
-    return hostauth_block();
+    return hostauth_block() && host_driven_unit(unit);
 }
 
 int avp_coop_block_death_h(uint32_t handle)
 {
-    (void)handle;
-    return hostauth_block();
+    uint32_t obj;
+    if (!hostauth_block() || !(handle >> 16)) return 0;
+    obj = G32(CP_OBJ_TABLE + (handle >> 16) * 4u);
+    return host_driven_unit(obj);
 }
 
 int avp_coop_skip_ai(uint32_t ai)
@@ -1712,16 +1794,66 @@ int avp_coop_parent_bad(uint32_t obj)
     uint32_t p, hops;
     static int told;
     if (!coop_live() || !obj) return 0;
-    if (!cp_obj_ok(obj)) return 0;
+    if (!cp_obj_ok(obj)) goto bad;
     p = G32(obj + 8u);
     for (hops = 0; hops < 64u; hops++) {
-        if (!p) return 0;
+        if (!p) break;
         if (!cp_obj_ok(p) || p == obj) goto bad;
         p = G32(p + 8u);
     }
+    if (hops >= 64u) goto bad;
+    p = G32(obj + 8u);
+    for (hops = 0; p; hops++) {
+        if (hops >= 8192u || !cp_obj_ok(p) || p == obj) goto bad;
+        p = G32(p + 0x10u);
+    }
+    p = G32(obj + 0xCu);
+    for (hops = 0; p; hops++) {
+        if (hops >= 64u || !cp_obj_ok(p) || p == obj) goto bad;
+        p = G32(p + 0xCu);
+    }
+    return 0;
 bad:
     if (told++ < 10) fprintf(stderr, "[COOP] skipped an object whose parent chain is cyclic or damaged (%08X)\n", obj);
     return 1;
+}
+
+#define BADMV_MAX 32
+static struct { uint32_t m, h; } s_badmv[BADMV_MAX];
+static int s_badmv_n;
+static uint32_t s_cur_mover;
+static uint32_t s_mv_iter;
+
+static int mover_is_bad(uint32_t m)
+{
+    int i;
+    for (i = 0; i < s_badmv_n; i++)
+        if (s_badmv[i].m == m) {
+            if (G32(m + 0x18u) == s_badmv[i].h) return 1;
+            s_badmv[i] = s_badmv[--s_badmv_n];
+            return 0;
+        }
+    return 0;
+}
+
+static void mover_mark_bad(uint32_t m, const char *why)
+{
+    static int told;
+    if (!cp_obj_ok(m) || mover_is_bad(m)) return;
+    if (s_badmv_n < BADMV_MAX) {
+        s_badmv[s_badmv_n].m = m;
+        s_badmv[s_badmv_n].h = G32(m + 0x18u);
+        s_badmv_n++;
+    }
+    if (told++ < 12) fprintf(stderr, "[COOP] mover %08X is skipped from now on: %s\n", m, why);
+}
+
+static int unit_registered(uint32_t obj)
+{
+    uint32_t h;
+    if (!cp_obj_ok(obj)) return 0;
+    h = G32(obj + 0x18u);
+    return (h >> 16) && G32(CP_OBJ_TABLE + (h >> 16) * 4u) == obj;
 }
 
 int avp_coop_mover_pre(uint32_t m)
@@ -1729,6 +1861,7 @@ int avp_coop_mover_pre(uint32_t m)
     uint32_t vt, own, ov;
     static int told;
     if (!coop_live()) return 0;
+    s_mv_iter = 0;
     if (!cp_obj_ok(m)) goto bad;
     vt = G32(m);
     if (!rdata_ptr(vt) || !text_ptr(G32(vt + 0x9Cu))) goto bad;
@@ -1737,11 +1870,90 @@ int avp_coop_mover_pre(uint32_t m)
         if (!cp_obj_ok(own)) goto bad;
         ov = G32(own);
         if (!rdata_ptr(ov) || !text_ptr(G32(ov + 0x4Cu)) || !text_ptr(G32(ov + 0x50u))) goto bad;
+        if (s_role == ROLE_GUEST && !unit_registered(own)) {
+            mover_mark_bad(m, "its unit is no longer a registered object");
+            return 1;
+        }
     }
+    if (mover_is_bad(m)) return 1;
+    s_cur_mover = m;
     return 0;
 bad:
     if (told++ < 10) fprintf(stderr, "[COOP] skipped a mover update whose unit or class data is damaged (mover %08X)\n", m);
     return 1;
+}
+
+int avp_coop_mover_spin(uint32_t m)
+{
+    static uint32_t last_m, over;
+    if (!coop_live()) return 0;
+    if (++s_mv_iter < 2048u) return 0;
+    s_mv_iter = 0;
+    if (m == last_m) over++;
+    else { last_m = m; over = 1; }
+    if (over >= 3u) mover_mark_bad(m, "its update loop did not finish");
+    return 1;
+}
+
+#define NULLQ_MAX 16
+static uint32_t s_nullq[NULLQ_MAX];
+static int s_nullq_n;
+
+static int in_mover_code(uint32_t a)
+{
+    return (a >= 0x0007F000u && a < 0x00081800u) || (a >= 0x00121000u && a < 0x00123000u);
+}
+
+void avp_coop_null_vcall(uint32_t self, uint32_t target)
+{
+    static ULONGLONG frame;
+    static uint32_t hits, seen_ra[24];
+    static int nseen;
+    uint32_t esp, k, ra[8], nra = 0, obj, h, i;
+    int mover_caller = 0, known = 0;
+    if (!coop_live()) return;
+    if (frame != s_tick_ms) { frame = s_tick_ms; hits = 0; }
+    hits++;
+    if (hits > 8u && (hits & (hits - 1u))) return;
+    esp = avp_guest_esp();
+    if (esp >= 0x10000u && esp < CP_LOCAL_HI - 0x400u)
+        for (k = 0; k < 96u && nra < 8u; k++) {
+            uint32_t v = G32(esp + 4u * k);
+            if (text_ptr(v)) ra[nra++] = v;
+        }
+    for (i = 0; i < nra; i++)
+        if (in_mover_code(ra[i])) mover_caller = 1;
+    obj = unit_registered(self) ? self : 0;
+    h = obj ? G32(obj + 0x18u) : 0;
+    if (nra) {
+        for (i = 0; i < (uint32_t)nseen; i++)
+            if (seen_ra[i] == ra[0]) known = 1;
+        if (!known && nseen < 24) {
+            char nm[48];
+            seen_ra[nseen++] = ra[0];
+            vt_name(obj ? G32(obj) : 0, nm, sizeof nm);
+            fprintf(stderr, "[COOP] null virtual call (target %08X) from %08X on %s %08X (%s, %u in this frame); callers %08X %08X %08X\n",
+                    target, ra[0], obj ? "object" : "a non-object", self, nm[0] ? nm : "no class", hits,
+                    nra > 1 ? ra[1] : 0u, nra > 2 ? ra[2] : 0u, nra > 3 ? ra[3] : 0u);
+        }
+    }
+    if (obj && !is_hidden(h) && !cp_map_to_host(h) && s_role == ROLE_GUEST && s_nullq_n < NULLQ_MAX) {
+        uint32_t fl = cp_class(G32(obj));
+        if ((fl & CF_UNIT) && !(fl & (CF_STATIC | CF_HELPER))) {
+            int dup = 0;
+            for (i = 0; i < (uint32_t)s_nullq_n; i++)
+                if (s_nullq[i] == h) dup = 1;
+            if (!dup) s_nullq[s_nullq_n++] = h;
+        }
+    }
+    if (mover_caller && s_cur_mover && hits >= 65536u) mover_mark_bad(s_cur_mover, "a null virtual call kept repeating inside its update");
+}
+
+static void nullq_drain(void)
+{
+    int i;
+    for (i = 0; i < s_nullq_n; i++) hide_local(s_nullq[i]);
+    s_nullq_n = 0;
 }
 
 int avp_rtti_bad(uint32_t esp)
@@ -1895,7 +2107,7 @@ static void tech_apply_direct(uint32_t fn, uint32_t id)
         if (vt < 0x002050C0u || vt >= 0x00265D60u || (vt & 3u)) continue;
         cls = cp_class(vt);
         if (!(cls & CF_AVP) || (cls & CF_HELPER)) continue;
-        if (G8(obj + 0x26Du) || G8(obj + 0x26Au)) continue;
+        if (G8(obj + 0x26Du) || G8(obj + 0x26Au) || is_hidden(G32(obj + 0x18u))) continue;
         seen++;
         if (fn == 0x00052FE0u) {
             uint32_t a[1];
@@ -1969,7 +2181,7 @@ static void exec_tech1(const CpOrder *o)
     if (!obj && vt)
         for (idx = 1; idx < 0x10000u; idx++) {
             uint32_t ob = G32(AVP_OBJ_TABLE + idx * 4u);
-            if (cp_obj_ok(ob) && G32(ob) == vt) { obj = ob; cnt++; }
+            if (cp_obj_ok(ob) && G32(ob) == vt && !G8(ob + 0x26Du) && !is_hidden(G32(ob + 0x18u))) { obj = ob; cnt++; }
         }
     if (!obj || (!h && cnt != 1)) {
         fprintf(stderr, "[COOP] tech row %08X: no matching local object for the apply, left to the flag fallback\n", id);
@@ -2412,7 +2624,7 @@ static void exec_reinf(const CpOrder *o)
     who = G32(pm + 0x18) & 0xFFFFu;
     if (o->h[0]) {
         ch = cp_map_to_client(o->h[0]);
-        drop = ch ? cp_obj_of(ch) : 0;
+        drop = ch && cp_handle_usable(ch) ? cp_obj_of(ch) : 0;
     }
     for (i = 0; i < 7; i++) G32(0x002F6A90u + 4 * i) = o->h[1 + i];
     a[0] = o->a;
@@ -2625,10 +2837,14 @@ static void spawn_reset(void)
     s_bl_n = 0;
     s_tech_nsent = 0;
     s_hidden_n = 0;
+    s_badmv_n = 0;
+    s_cur_mover = 0;
+    s_nullq_n = 0;
     s_t1_n = 0;
     s_t_applied_n = 0;
     memset(s_flip, 0, sizeof s_flip);
     g_cp_tech_flip = tech_flip_note;
+    g_cp_hidden = hidden_cb;
     s_sp_drop = 0;
 }
 
@@ -3714,7 +3930,7 @@ void avp_coop_input_begin(void)
     STEP(2, 0, 0);
     kill_pump();
     STEP(3, 0, 0);
-    if (guest_live()) spawns_exec();
+    if (guest_live()) { nullq_drain(); hidden_tick(); spawns_exec(); }
     STEP(4, 0, 0);
     orders_exec();
     STEP(5, 0, 0);

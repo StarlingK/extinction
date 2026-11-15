@@ -116,6 +116,8 @@ int cp_order_xlate_out(uint32_t type, uint8_t *msg, uint32_t size);
 uint32_t cp_order_msg_build(const CpOrder *o, uint8_t *out, uint32_t cap);
 int cp_target_ok(uint32_t handle);
 int cp_unit_ok(uint32_t handle);
+int cp_handle_usable(uint32_t handle);
+extern int (*g_cp_hidden)(uint32_t handle);
 
 uint32_t cp_pcall_count(void);
 uint32_t cp_pcall_fn(uint32_t idx);
