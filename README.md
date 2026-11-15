@@ -1,6 +1,6 @@
 # Aliens vs Predator: Extinction PC Port
 
-## For those having issues installing this, it requires the USA Xbox release. The version I've been told works, is from a lair.
+## For those having issues installing this, it requires the USA Xbox release. The version I've been told works, is from a *lair*.
 
 > This is an unofficial fan project. It is not affiliated with or endorsed by 20th Century Studios, Disney, Zono, Electronic Arts or Microsoft. *Aliens*, *Predator* and *Aliens versus Predator* are trademarks of their respective owners. You must provide your own dump of the Xbox version.
 
