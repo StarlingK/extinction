@@ -15,6 +15,7 @@ JOBS=""
 FORCE_RECOMPILE=0
 CLEAN=0
 GAME=""
+STEAM_DIR=""
 
 die() {
     echo "error: $*" >&2
@@ -40,6 +41,8 @@ options:
   -j N, --jobs N   parallel compile jobs (default: all cores)
   --recompile      run the recompiler again even if its output is up to date
   --clean          delete the CMake build folder for the target first
+  --steam-dir D    optional: folder with the Steamworks redistributable to embed
+                   (steam_api64.dll for windows, libsteam_api.so for linux)
   -h, --help       show this text
 
 The finished program is written to dist/<target>/.
@@ -60,6 +63,10 @@ while [ $# -gt 0 ]; do
         --jobs=*) JOBS="${1#--jobs=}"; shift ;;
         --recompile) FORCE_RECOMPILE=1; shift ;;
         --clean) CLEAN=1; shift ;;
+        --steam-dir)
+            [ $# -ge 2 ] || die "--steam-dir needs a folder"
+            STEAM_DIR="$2"; shift 2 ;;
+        --steam-dir=*) STEAM_DIR="${1#--steam-dir=}"; shift ;;
         -*) die "unknown option: $1 (see --help)" ;;
         *)
             [ -z "$GAME" ] || die "more than one game path given: '$GAME' and '$1'"
@@ -250,6 +257,9 @@ if [ "$TARGET" = "windows" ]; then
         -DCMAKE_TOOLCHAIN_FILE="$TOOLKIT/cmake/mingw-w64-x86_64.cmake"
         -DAVP_ICON_XBE="$XBE"
     )
+fi
+if [ -n "$STEAM_DIR" ]; then
+    cmake_args+=(-DAVP_STEAM_DIR="$STEAM_DIR")
 fi
 cmake "${cmake_args[@]}" || die "CMake configuration failed"
 

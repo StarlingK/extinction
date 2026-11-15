@@ -659,6 +659,8 @@ static int rename_path(const char *from, const char *to)
 #endif
 }
 
+extern int avp_steam_unpack(const char *gamedir);
+
 static int run_setup(const char *base)
 {
     static const char title[] = "Aliens versus Predator: Extinction";
@@ -755,6 +757,7 @@ static int run_setup(const char *base)
             fprintf(stderr, "[SETUP] copied %d entries in %lu ms\n", s_n,
                     (unsigned long)(GetTickCount() - t0));
         }
+        avp_steam_unpack(game);
         free(s_ent);
         s_ent = NULL;
         s_n = s_cap = 0;

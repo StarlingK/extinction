@@ -1,5 +1,6 @@
 #include "avp_coop_proto.h"
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 typedef struct { uint16_t off; uint8_t type; uint32_t mask; } CpField;
@@ -128,6 +129,25 @@ static int sim_ptr(uint32_t w)
     return w >= CP_LOCAL_LO && w < CP_LOCAL_HI;
 }
 
+static int looks_ptr(uint32_t w)
+{
+    return sim_ptr(w) || (w >= 0x002050C0u && w < 0x00310680u) || (w >= 0x80000000u && w < 0xA0000000u);
+}
+
+static void ptr_skip_note(uint32_t vt, uint32_t off, uint32_t v)
+{
+    static struct { uint32_t vt, off; } seen[64];
+    static int n;
+    int i;
+    for (i = 0; i < n; i++)
+        if (seen[i].vt == vt && seen[i].off == off) return;
+    if (n >= 64) return;
+    seen[n].vt = vt;
+    seen[n].off = off;
+    n++;
+    fprintf(stderr, "[COOP] skipped a pointer-like value %08X at offset %X of class %08X (not copied from the host)\n", v, off, vt);
+}
+
 static int td_is(uint32_t td, const char *s)
 {
     uint32_t i;
@@ -135,6 +155,16 @@ static int td_is(uint32_t td, const char *s)
     for (i = 0; s[i]; i++)
         if (G8(td + 8u + i) != (uint8_t)s[i]) return 0;
     return G8(td + 8u + i) == 0;
+}
+
+static int td_has(uint32_t td, const char *s)
+{
+    char nm[64];
+    uint32_t k = 0;
+    if (td < 0x10000u || td >= CP_LOCAL_HI - 0x100u) return 0;
+    while (k + 1 < sizeof nm && G8(td + 8u + k)) { nm[k] = (char)G8(td + 8u + k); k++; }
+    nm[k] = 0;
+    return strstr(nm, s) != NULL;
 }
 
 static uint32_t rtti_flags(uint32_t vt)
@@ -157,6 +187,11 @@ static uint32_t rtti_flags(uint32_t vt)
         else if (td_is(td, ".?AVGPlayerManager@@")) fl |= CF_PM;
         else if (td_is(td, ".?AVGTrigger@@")) fl |= CF_TRIG;
         else if (td_is(td, ".?AVGSquad@@")) fl |= CF_SQUAD;
+        if (td_has(td, "Observer") || td_has(td, "Camera") || td_has(td, "Trigger") || td_has(td, "Sound") || td_has(td, "Light") ||
+            td_has(td, "Effect") || td_has(td, "Marker") || td_has(td, "AI") || td_has(td, "Leap") || td_has(td, "Behaviour") ||
+            td_has(td, "State") || td_has(td, "Action")) fl |= CF_HELPER;
+        if (td_has(td, "Egg")) fl |= CF_NOREPLAY;
+        if (td_has(td, "HiveNode") || td_has(td, "SentryGun") || td_has(td, "Turret") || td_has(td, "Beacon")) fl |= CF_STATIC;
     }
     return fl;
 }
@@ -175,6 +210,41 @@ static uint32_t cls_peek(uint32_t vt)
         if (s_cls[k].vt == vt) return s_cls[k].fl;
         if (!s_cls[k].vt) break;
     }
+    return 0;
+}
+
+static int bases_of(uint32_t vt, uint32_t *out, uint32_t max)
+{
+    uint32_t col, chd, bca, n, i, k = 0;
+    if (vt < 0x10020u || vt >= 0x0031B000u || (vt & 3u)) return 0;
+    col = G32(vt - 4u);
+    if (col < 0x10000u || col >= CP_LOCAL_HI - 0x100u || (col & 3u)) return 0;
+    chd = G32(col + 16u);
+    if (chd < 0x10000u || chd >= CP_LOCAL_HI - 0x100u || (chd & 3u)) return 0;
+    n = G32(chd + 8u);
+    bca = G32(chd + 12u);
+    if (n == 0 || n > 64u || bca < 0x10000u || bca >= CP_LOCAL_HI - 0x400u || (bca & 3u)) return 0;
+    for (i = 0; i < n && k < max; i++) {
+        uint32_t bcd = G32(bca + i * 4u);
+        if (bcd < 0x10000u || bcd >= CP_LOCAL_HI - 0x100u) continue;
+        out[k++] = G32(bcd);
+    }
+    return (int)k;
+}
+
+int cp_classes_related(uint32_t vt_a, uint32_t vt_b)
+{
+    uint32_t a[64], b[64];
+    int na = bases_of(vt_a, a, 64), nb = bases_of(vt_b, b, 64), i, j;
+    for (i = 0; i < na; i++)
+        for (j = 0; j < nb; j++) {
+            if (a[i] != b[j]) continue;
+            if (td_is(a[i], ".?AVGUnit@@") || td_is(a[i], ".?AVGSpecies@@") || td_is(a[i], ".?AVGAvPObject@@") ||
+                td_is(a[i], ".?AVGAnimatable@@") || td_is(a[i], ".?AVGAttachable@@") || td_is(a[i], ".?AVGPhysical@@") ||
+                td_is(a[i], ".?AVGPosRot@@") || td_is(a[i], ".?AVGObject@@") || td_is(a[i], ".?AVGNPC@@") || td_is(a[i], ".?AVGStructure@@"))
+                continue;
+            return 1;
+        }
     return 0;
 }
 
@@ -228,7 +298,7 @@ int cp_target_ok(uint32_t handle)
 int cp_unit_ok(uint32_t handle)
 {
     uint32_t obj = cp_obj_of(handle);
-    return obj && (cp_class(G32(obj)) & CF_UNIT);
+    return obj && (cp_class(G32(obj)) & CF_UNIT) && !(cp_class(G32(obj)) & CF_STATIC);
 }
 
 typedef struct { uint32_t handle, flags; uint32_t w[CP_FIELDS_MAX]; } CpCache;
@@ -243,6 +313,8 @@ static uint64_t s_tech_hash;
 
 static uint32_t s_h2c_h[0x10000], s_h2c_c[0x10000], s_c2h_c[0x10000], s_c2h_h[0x10000];
 static uint32_t s_claim_ep[0x10000], s_claim_h[0x10000], s_epoch;
+uint32_t g_cp_orphan_need = 2;
+int g_cp_kill_orphan;
 static uint8_t s_orphan_n[0x10000];
 static uint32_t s_orphan_h[0x10000];
 
@@ -363,6 +435,17 @@ uint32_t cp_state_build(uint8_t *buf, uint32_t cap, uint32_t seq, int full, uint
             th = fnv64(th, rw, sizeof rw);
         }
         if (n && (full || th != s_tech_hash)) {
+            static uint32_t prev[CP_TECH_MAX][2];
+            static uint32_t prev_n;
+            for (r = 0; r < n; r++) {
+                uint32_t id = G32(tt + 0x38 + r * 8u), fv = G32(tt + 0x3C + r * 8u);
+                if (r < prev_n && r < CP_TECH_MAX && prev[r][0] == id && prev[r][1] != fv) {
+                    static int told;
+                    if (told++ < 60) fprintf(stderr, "[COOP] host tech row %08X: flags %08X -> %08X (available %u researched %u upgraded %u)\n", id, prev[r][1], fv, fv & 0xFFu, (fv >> 8) & 0xFFu, (fv >> 16) & 0xFFu);
+                }
+                if (r < CP_TECH_MAX) { prev[r][0] = id; prev[r][1] = fv; }
+            }
+            prev_n = n;
             for (r = 0; r < n; r++) {
                 put(buf, &o, G32(tt + 0x38 + r * 8u));
                 put(buf, &o, G32(tt + 0x3C + r * 8u));
@@ -404,7 +487,7 @@ uint32_t cp_state_build(uint8_t *buf, uint32_t cap, uint32_t seq, int full, uint
         nobj++;
         c = slot_get(i);
         same_handle = c && c->handle == h;
-        if (hk && hk->owner && (fl & CF_UNIT) && hk->owner(h) == 1) oflag = 1;
+        if (hk && hk->owner && (fl & CF_UNIT) && !(fl & CF_STATIC) && hk->owner(h) == 1) oflag = 1;
         for (k = 0; k < nf; k++) {
             int ch;
             w[k] = G32(obj + f[k].off) & f[k].mask;
@@ -700,7 +783,8 @@ static void apply_obj(uint32_t obj, uint32_t vt, uint32_t rflags, const uint8_t 
             if (finite_f(u2f(v))) G32(obj + f[k].off) = v;
             break;
         case FT_INT:
-            if (!sim_ptr(v)) G32(obj + f[k].off) = v;
+            if (!looks_ptr(v) || v == cur) G32(obj + f[k].off) = v;
+            else ptr_skip_note(vt, f[k].off, v);
             break;
         case FT_HND:
             if (!v) G32(obj + f[k].off) = 0;
@@ -719,7 +803,7 @@ static void apply_obj(uint32_t obj, uint32_t vt, uint32_t rflags, const uint8_t 
             break;
         }
     }
-    if ((fl & CF_UNIT) && hk && hk->owner_set) hk->owner_set(h, (int)(rflags & 1u));
+    if ((fl & CF_UNIT) && !(fl & CF_STATIC) && hk && hk->owner_set) hk->owner_set(h, (int)(rflags & 1u));
     if ((fl & CF_AVP) && (got_p || got_r)) {
         uint32_t idx = h >> 16, a;
         float cp[3], err2 = 0.0f;
@@ -803,8 +887,10 @@ static void apply_globals(const uint8_t *p, uint32_t npm, uint32_t ntech, uint32
             uint32_t v = rd32(w + 4u * k);
             if (k_pm_f[k].type == FT_FLT) {
                 if (range_f(u2f(v), 1.0e9f)) G32(pm + k_pm_f[k].off) = v;
-            } else if ((int32_t)v > -1000000000 && (int32_t)v < 1000000000) {
+            } else if ((int32_t)v > -1000000000 && (int32_t)v < 1000000000 && (!looks_ptr(v) || v == G32(pm + k_pm_f[k].off))) {
                 G32(pm + k_pm_f[k].off) = v;
+            } else if (looks_ptr(v)) {
+                ptr_skip_note(0xFFFFFFFFu, k_pm_f[k].off, v);
             }
         }
         st->pm++;
@@ -813,7 +899,16 @@ static void apply_globals(const uint8_t *p, uint32_t npm, uint32_t ntech, uint32
         uint32_t tt, n = tech_rows(&tt), r;
         for (r = 0; r < ntech && r < n; r++) {
             uint32_t id = rd32(p + *o + r * 8u), fl = rd32(p + *o + r * 8u + 4u);
-            if (id == G32(tt + 0x38 + r * 8u)) G8(tt + 0x3Fu + r * 8u) = (uint8_t)(fl >> 24);
+            if (id == G32(tt + 0x38 + r * 8u)) {
+                uint32_t old = G32(tt + 0x3Cu + r * 8u);
+                if ((fl & 0x00FF0000u) && !(old & 0x00FF0000u) && g_cp_tech_flip) g_cp_tech_flip(id);
+                fl = (fl & 0xFF00FFFFu) | (old & 0x00FF0000u);
+                if (old != fl) {
+                    static int told;
+                    if (told++ < 60) fprintf(stderr, "[COOP] tech row %08X: flags %08X -> %08X (available %u researched %u upgraded %u), applied from the host\n", id, old, fl, fl & 0xFFu, (fl >> 8) & 0xFFu, (fl >> 16) & 0xFFu);
+                    G32(tt + 0x3Cu + r * 8u) = fl;
+                }
+            }
         }
         st->tech += r;
         *o += ntech * 8u;
@@ -852,9 +947,6 @@ void cp_state_apply(const uint8_t *p, uint32_t len, const CpHooks *hk, CpApplySt
     s_epoch++;
     s_pend_n = 0;
     {
-        float hc = u2f(rd32(p + 24)), lc = GF(CP_CLOCK);
-        if (finite_f(hc) && hc >= 0.0f && hc < 1.0e8f && (!finite_f(lc) || hc - lc > 0.3f || lc - hc > 0.3f))
-            G32(CP_CLOCK) = rd32(p + 24);
         G32(CP_RNG_ACC) = rd32(p + 28);
         G32(CP_RNG_SEED) = rd32(p + 32);
     }
@@ -897,7 +989,8 @@ void cp_state_apply(const uint8_t *p, uint32_t len, const CpHooks *hk, CpApplySt
             uint32_t rec = s_unm[u], hh = rd32(p + rec), vt = rd32(p + rec + 4), mlo = rd32(p + rec + 12), mhi = rd32(p + rec + 16);
             uint32_t c, best = 0xFFFFFFFFu;
             float pos[3] = { 0, 0, 0 }, bd = CP_MATCH_DIST * CP_MATCH_DIST;
-            if (rec_pos(vt, mlo, mhi, p + rec + 20, pos)) {
+            int haspos = rec_pos(vt, mlo, mhi, p + rec + 20, pos);
+            if (haspos) {
                 for (c = 0; c < ncand; c++) {
                     float dx, dy, dz, d2;
                     if (!s_cand[c].obj || G32(s_cand[c].obj) != vt) continue;
@@ -921,7 +1014,7 @@ void cp_state_apply(const uint8_t *p, uint32_t len, const CpHooks *hk, CpApplySt
                 apply_obj(obj, vt, rd32(p + rec + 8), p + rec + 20, mlo, mhi, now_ms, hk);
             } else {
                 st->unmatched++;
-                if (hk && hk->unmatched) hk->unmatched(vt);
+                if (hk && hk->unmatched) hk->unmatched(vt, hh, haspos ? pos : NULL);
             }
         }
     }
@@ -947,10 +1040,12 @@ void cp_state_apply(const uint8_t *p, uint32_t len, const CpHooks *hk, CpApplySt
                 s_orphan_n[idx] = 0;
             }
             if (G8(obj + 0x26Du)) continue;
-            if (++s_orphan_n[idx] >= 2u) {
+            if (++s_orphan_n[idx] >= g_cp_orphan_need) {
                 st->orphans++;
                 if (hk && hk->kill) {
+                    g_cp_kill_orphan = 1;
                     hk->kill(h);
+                    g_cp_kill_orphan = 0;
                     st->kills++;
                 }
                 s_orphan_n[idx] = 0;
@@ -1167,7 +1262,31 @@ int cp_order_parse(const uint8_t *p, uint32_t len, CpOrder *o)
             o->h[1 + i] = t;
         }
         return o->a <= 1000000u && o->b <= 1000000u;
+    case CP_CMD_TECH2:
+        if (len != 20u) return 0;
+        o->a = rd32(p + 4);
+        o->b = rd32(p + 8);
+        o->c = rd32(p + 12);
+        o->d = rd32(p + 16);
+        return (o->a == 0x00052FE0u || o->a == 0x00053360u) && (o->b >> 16);
+    case CP_CMD_TECH1:
+        if (len != 16u) return 0;
+        o->a = rd32(p + 4);
+        o->b = rd32(p + 8);
+        o->c = rd32(p + 12);
+        return o->a != 0;
+    case CP_CMD_TECH: {
+        uint32_t n;
+        if (len < 12u) return 0;
+        o->a = rd32(p + 4);
+        n = rd32(p + 8);
+        if (n == 0 || n > 16u || len != 12u + 4u * n) return 0;
+        o->b = n;
+        for (i = 0; i < n; i++) o->h[i] = rd32(p + 12 + 4 * i);
+        return 1;
+    }
     case CP_CMD_BUY:
+    case CP_CMD_UPG:
         if (len != 8u) return 0;
         o->a = rd32(p + 4);
         return o->a < 32u;
@@ -1227,6 +1346,45 @@ uint32_t cp_enc_order(uint8_t *out, uint32_t unit, uint32_t type, uint32_t prio,
 uint32_t cp_enc_buy(uint8_t *out, uint32_t idx)
 {
     wr32(out, CP_CMD_BUY);
+    wr32(out + 4, idx);
+    return 8u;
+}
+
+void (*g_cp_tech_flip)(uint32_t id);
+
+uint32_t cp_enc_tech2(uint8_t *out, uint32_t fn, uint32_t handle, uint32_t vt, uint32_t id)
+{
+    wr32(out, CP_CMD_TECH2);
+    wr32(out + 4, fn);
+    wr32(out + 8, handle);
+    wr32(out + 12, vt);
+    wr32(out + 16, id);
+    return 20u;
+}
+
+uint32_t cp_enc_tech1(uint8_t *out, uint32_t id, uint32_t handle, uint32_t vt)
+{
+    wr32(out, CP_CMD_TECH1);
+    wr32(out + 4, id);
+    wr32(out + 8, handle);
+    wr32(out + 12, vt);
+    return 16u;
+}
+
+uint32_t cp_enc_tech(uint8_t *out, uint32_t vt, const uint32_t *ids, uint32_t n)
+{
+    uint32_t i;
+    if (n > 16u) n = 16u;
+    wr32(out, CP_CMD_TECH);
+    wr32(out + 4, vt);
+    wr32(out + 8, n);
+    for (i = 0; i < n; i++) wr32(out + 12 + 4 * i, ids[i]);
+    return 12u + 4u * n;
+}
+
+uint32_t cp_enc_upg(uint8_t *out, uint32_t idx)
+{
+    wr32(out, CP_CMD_UPG);
     wr32(out + 4, idx);
     return 8u;
 }
@@ -1297,4 +1455,75 @@ uint32_t cp_enc_reinf(uint8_t *out, uint32_t cost, uint32_t supply, uint32_t dro
     wr32(out + 12, drop);
     for (i = 0; i < 7; i++) wr32(out + 16 + 4 * i, types[i]);
     return 44u;
+}
+
+uint32_t cp_fnv32(const void *p, uint32_t n)
+{
+    const uint8_t *b = (const uint8_t *)p;
+    uint32_t h = 2166136261u;
+    while (n--) { h ^= *b++; h *= 16777619u; }
+    return h;
+}
+
+int cp_class_replicable(uint32_t vt)
+{
+    uint32_t fl = cp_class(vt), n;
+    return fields_of(fl, &n) != NULL;
+}
+
+void cp_map_unbind(uint32_t host_handle)
+{
+    if (host_handle >> 16) map_clear_h(host_handle >> 16);
+}
+
+void cp_map_bind(uint32_t host_handle, uint32_t client_handle)
+{
+    if (!(host_handle >> 16) || !(client_handle >> 16)) return;
+    map_set(host_handle, client_handle);
+}
+
+uint32_t cp_enc_spawn(uint8_t *out, const CpSpawn *s)
+{
+    uint32_t o = 0, i;
+    if (s->n > CP_SPAWN_WORDS || s->fill_len > CP_SPAWN_FILL) return 0;
+    wr32(out + o, s->kind); o += 4;
+    wr32(out + o, s->host_h); o += 4;
+    wr32(out + o, s->host_vt); o += 4;
+    wr32(out + o, s->n); o += 4;
+    wr32(out + o, s->fill_ptr); o += 4;
+    wr32(out + o, s->fill_len); o += 4;
+    wr32(out + o, s->fill_hash); o += 4;
+    for (i = 0; i < s->n; i++) { wr32(out + o, s->w[i]); o += 4; }
+    memcpy(out + o, s->fill, s->fill_len);
+    o += s->fill_len;
+    return o;
+}
+
+int cp_spawn_parse(const uint8_t *p, uint32_t len, CpSpawn *s)
+{
+    uint32_t i;
+    if (!p || len < CP_SPAWN_HDR || len > CP_SPAWN_WIRE_MAX) return 0;
+    memset(s, 0, sizeof *s);
+    s->kind = rd32(p);
+    s->host_h = rd32(p + 4);
+    s->host_vt = rd32(p + 8);
+    s->n = rd32(p + 12);
+    s->fill_ptr = rd32(p + 16);
+    s->fill_len = rd32(p + 20);
+    s->fill_hash = rd32(p + 24);
+    if (s->n > CP_SPAWN_WORDS || s->fill_len > CP_SPAWN_FILL || (s->fill_len & 3u)) return 0;
+    if ((uint64_t)CP_SPAWN_HDR + 4ull * s->n + s->fill_len != len) return 0;
+    if (!(s->host_h >> 16) || s->host_vt < 0x10020u || s->host_vt >= 0x0031B000u || (s->host_vt & 3u)) return 0;
+    for (i = 0; i < s->n; i++) s->w[i] = rd32(p + CP_SPAWN_HDR + 4u * i);
+    memcpy(s->fill, p + CP_SPAWN_HDR + 4u * s->n, s->fill_len);
+    if (s->fill_len && cp_fnv32(s->fill, s->fill_len) != s->fill_hash) return 0;
+    switch (s->kind) {
+    case CP_SPAWN_MSG15:
+        return s->n >= 12u && !s->fill_len && s->w[0] == 0x15u;
+    case CP_SPAWN_FACT:
+        return s->n == 6u && s->w[1] != 0;
+    case CP_SPAWN_CKEY:
+        return s->n == 3u && !s->fill_len && s->w[0] != 0;
+    }
+    return 0;
 }

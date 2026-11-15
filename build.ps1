@@ -5,6 +5,7 @@ param(
     [switch]$Clean,
     [switch]$Recompile,
     [switch]$UseSystemTools,
+    [string]$SteamDir = '',
     [ValidateSet('windows')][string]$Target = 'windows',
     [switch]$Help
 )
@@ -477,6 +478,7 @@ function Invoke-Compile([string]$Xbe) {
     if (-not $UseSystemTools) {
         $cmakeArgs += "-DCMAKE_RC_COMPILER=$((Get-Command llvm-windres).Source)"
     }
+    if ($SteamDir) { $cmakeArgs += "-DAVP_STEAM_DIR=$SteamDir" }
     $cmake = (Get-Command cmake).Source
     Write-Host 'configure'
     if ((Invoke-Native $cmake $cmakeArgs) -ne 0) { Fail 'cmake configure failed' }
@@ -514,7 +516,7 @@ function Invoke-Build {
 }
 
 if ($Help) {
-    Write-Host 'usage: build.ps1 [game] [-Jobs n] [-Clean] [-Recompile] [-UseSystemTools] [-Target windows]'
+    Write-Host 'usage: build.ps1 [game] [-Jobs n] [-Clean] [-Recompile] [-UseSystemTools] [-SteamDir folder] [-Target windows]'
     exit 0
 }
 

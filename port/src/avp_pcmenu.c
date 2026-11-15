@@ -10,6 +10,7 @@
 #include "avp_skirmish.h"
 #include "avp_editor.h"
 #include "avp_layer.h"
+#include "avp_steam.h"
 #ifndef _WIN32
 #include <SDL.h>
 #include <sys/stat.h>
@@ -36,6 +37,9 @@ extern void xbox_InputKeysClear(void);
 extern int  avp_coop_host(int port);
 extern int  avp_coop_join(const char *ip, int port);
 extern void avp_coop_cancel(void);
+extern int  avp_coop_host_steam(void);
+extern int  avp_coop_join_steam_code(const char *code);
+extern int  avp_coop_join_steam_lobby(unsigned long long lobby);
 extern int  avp_coop_state(void);
 extern const char *avp_coop_state_text(void);
 extern const char *avp_coop_peer_name(void);
@@ -1142,25 +1146,10 @@ static void render_all(void)
 #define C_TXT_OFF   0x6A88B0u
 #define C_GOLD      0xF0D040u
 
-static void button(int x0, int y0, int x1, int y1, const char *label, int hot, int off, const char *tag)
-{
-    if (off)
-        rrect(x0, y0, x1, y1, (float)(y1 - y0) / 2, 0x1B2A40u, 0x0F1826u, 0.85f, 0x3E5678u, 2);
-    else if (hot)
-        rrect(x0, y0, x1, y1, (float)(y1 - y0) / 2, 0x2A64B4u, 0x143A78u, 0.92f, C_EDGE_HOT, 2.2f);
-    else
-        rrect(x0, y0, x1, y1, (float)(y1 - y0) / 2, 0x1C3C70u, 0x0E2246u, 0.80f, C_EDGE_DIM, 2);
-    text(x0 + 10, y0, x1 - 8, y1, label, off ? C_TXT_OFF : hot ? C_TXT_HOT : C_TXT, F_BTN,
-         DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    if (tag)
-        text(x0 + 10, y0, x1 - 12, y1, tag, off ? C_TXT_OFF : C_GOLD, F_BODY,
-             DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-}
-
-static void panel(int x0, int y0, int x1, int y1)
-{
-    rrect(x0, y0, x1, y1, 12, 0x0A1A38u, 0x06112Au, 0.95f, C_EDGE, 2);
-}
+static void button(int x0, int y0, int x1, int y1, const char *label, int hot, int off, const char *tag);
+static void panel(int x0, int y0, int x1, int y1);
+static void card(int x0, int y0, int x1, int y1);
+static void cell(int x0, int y0, int x1, int y1, int hot, int off);
 
 typedef struct { int x0, y0, x1, y1; } Box;
 
@@ -1244,6 +1233,45 @@ static void square_mark(int x, int y, int n, uint32_t c)
     rrect(x + n - 2, y + 2, x + n, y + n - 2, 0, c, c, 1, 0, 0);
 }
 
+static int plate_cut(int y0, int y1)
+{
+    int c = (int)((float)(y1 - y0) * 0.34f);
+    return c > 9 ? 9 : c < 2 ? 2 : c;
+}
+
+static void cell(int x0, int y0, int x1, int y1, int hot, int off)
+{
+    int cut = plate_cut(y0, y1);
+    if (off)
+        plate(x0, y0, x1, y1, cut, 0x16283Fu, 0x0A121Eu, 0.50f, 0x3E5678u, 1.5f, 0x5A7090u, 0x040810u);
+    else if (hot)
+        plate(x0, y0, x1, y1, cut, 0x2B6FB0u, 0x123F78u, 0.86f, 0x8CF0FFu, 1.6f, 0xD8FAFFu, 0x0A2448u);
+    else
+        plate(x0, y0, x1, y1, cut, 0x1B4478u, 0x0A2040u, 0.58f, 0x3C94D0u, 1.5f, 0x7CC8F4u, 0x040E20u);
+}
+
+static void button(int x0, int y0, int x1, int y1, const char *label, int hot, int off, const char *tag)
+{
+    int mk = y1 - y0 >= 22 ? 6 : 4, tx = x0 + (mk == 6 ? 24 : 18);
+    cell(x0, y0, x1, y1, hot && !off, off);
+    if (hot && !off) square_mark(x0 + 10, (y0 + y1) / 2 - mk / 2, mk, 0xE0D040u);
+    text(tx, y0, x1 - 8, y1, label, off ? C_TXT_OFF : hot ? C_TXT_HOT : 0xCFE4FAu, F_BTN,
+         DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    if (tag)
+        text(tx, y0, x1 - 12, y1, tag, off ? C_TXT_OFF : C_GOLD, F_BODY,
+             DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+}
+
+static void panel(int x0, int y0, int x1, int y1)
+{
+    plate(x0, y0, x1, y1, 16, 0x0C2244u, 0x050F26u, 0.93f, 0x3C94D0u, 1.8f, 0x7CC8F4u, 0x040E20u);
+}
+
+static void card(int x0, int y0, int x1, int y1)
+{
+    plate(x0, y0, x1, y1, 12, 0x0E2850u, 0x061430u, 0.80f, 0x2E7896u, 1.5f, 0x4C88B4u, 0x040E20u);
+}
+
 static void main_native(const Box *b, const char *label, int hot)
 {
     float rad = (float)(b->y1 - b->y0) * 0.34f;
@@ -1292,12 +1320,12 @@ static void main_plate(const Box *b, const char *label, int hot)
 }
 
 enum { SCR_MAIN, SCR_MP, SCR_SKIRM, SCR_SETTINGS, SCR_QUIT, SCR_KEYS,
-       SCR_EDITOR, SCR_HOST, SCR_JOIN, SCR_COOP };
+       SCR_EDITOR, SCR_HOST, SCR_JOIN, SCR_COOP, SCR_COOPMODE };
 
 typedef struct { const char *label; int game; int screen; const char *tag; int vis; } MainItem;
 static const MainItem k_main[] = {
     { "Campaign",       0, -1, NULL, 1 },
-    { "Co-op Campaign", -1, SCR_COOP, NULL, 1 },
+    { "Co-op Campaign", -1, SCR_COOPMODE, NULL, 1 },
     { "Multiplayer",    -1, SCR_MP, NULL, 0 },
     { "Skirmish vs AI", -1, SCR_SKIRM, NULL, 0 },
     { "Map Editor",     -1, SCR_EDITOR, NULL, 0 },
@@ -1345,9 +1373,11 @@ enum { ST_DISPLAY, ST_RES, ST_CAP, ST_VSYNC, ST_WIDE, ST_STYLE, ST_INPUT, ST_EDG
 static HWND s_hwnd;
 static int s_screen, s_sel, s_sel_main, s_forced, s_editing, s_mode, s_tf, s_join_logged;
 static int s_coop_from, s_co_side, s_co_col, s_set_scroll;
-static char s_ip[64];
+static char s_ip[64], s_code[8];
+static int s_co_steam;
+static const char k_code_alpha[] = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
-enum { TF_NONE, TF_PORT, TF_IP };
+enum { TF_NONE, TF_PORT, TF_IP, TF_CODE };
 static int s_handoff;
 static DWORD s_handoff_t;
 static int s_mx = -1, s_my = -1;
@@ -1637,6 +1667,15 @@ static void layout_coop(void)
     }
 }
 
+static void layout_coopmode(void)
+{
+    Box ip = { 200, 190, 440, 218 }, st = { 200, 228, 440, 256 }, bk = { 200, 284, 320, 310 };
+    s_nbox = 0;
+    s_box[s_nbox++] = ip;
+    s_box[s_nbox++] = st;
+    s_box[s_nbox++] = bk;
+}
+
 static void layout_keys(void)
 {
     int i;
@@ -1759,6 +1798,7 @@ static void layout(void)
     case SCR_MAIN: layout_main(); break;
     case SCR_SETTINGS: layout_settings(); break;
     case SCR_COOP: layout_coop(); break;
+    case SCR_COOPMODE: layout_coopmode(); break;
     case SCR_KEYS: layout_keys(); break;
     case SCR_MP: layout_mp(); break;
     case SCR_HOST: layout_host(); break;
@@ -2049,8 +2089,8 @@ static int mp_port(void)
 
 static char *tf_buf(size_t *cap)
 {
-    *cap = s_tf == TF_PORT ? 5 : 63;
-    return s_tf == TF_PORT ? s_set.mport : s_ip;
+    *cap = s_tf == TF_PORT ? 5 : s_tf == TF_CODE ? 6 : 63;
+    return s_tf == TF_PORT ? s_set.mport : s_tf == TF_CODE ? s_code : s_ip;
 }
 
 static void tf_add(int c)
@@ -2059,7 +2099,8 @@ static void tf_add(int c)
     char *b = tf_buf(&cap);
     n = strlen(b);
     if (n >= cap || c >= 127) return;
-    if (s_tf == TF_PORT ? (c >= '0' && c <= '9') : (isalnum(c) || c == '.' || c == '-')) {
+    if (s_tf == TF_CODE) c = toupper(c);
+    if (s_tf == TF_CODE ? (c && strchr(k_code_alpha, c) != NULL) : s_tf == TF_PORT ? (c >= '0' && c <= '9') : (isalnum(c) || c == '.' || c == '-')) {
         b[n] = (char)c;
         b[n + 1] = 0;
     }
@@ -2251,11 +2292,47 @@ static void coop_start(void)
     go(SCR_MAIN);
 }
 
+static void steam_activate(int i)
+{
+    int st = avp_coop_state(), role = avp_coop_role(), active = st == 1 || st == 2;
+    AvpSteamFriend fl[3];
+    if (i == 0) {
+        avp_steam_connect();
+    } else if (i == 1) {
+        s_co_side = 1;
+        if (role == 1 && active) { avp_coop_cancel(); return; }
+        tf_end();
+        avp_skirmish_disarm();
+        if (!avp_coop_host_steam() && avp_coop_state() != 3) coop_err("Could not host with Steam");
+    } else if (i == CO_ADDR) {
+        s_tf = TF_CODE;
+    } else if (i == CO_JOIN) {
+        s_co_side = 2;
+        if (role == 2 && st == 2 && avp_coop_guest_mission()) {
+            if (!avp_coop_set_ready(!avp_coop_self_ready())) coop_err("Could not reach the host");
+            return;
+        }
+        if (role == 2 && active) { avp_coop_cancel(); return; }
+        tf_end();
+        avp_skirmish_disarm();
+        s_join_logged = 1;
+        avp_coop_join_steam_code(s_code);
+    } else if (i >= CO_REC0 && i < CO_BACK) {
+        if (avp_steam_friends(fl, 3) > i - CO_REC0) {
+            s_co_side = 2;
+            avp_skirmish_disarm();
+            s_join_logged = 1;
+            avp_coop_join_steam_lobby((unsigned long long)fl[i - CO_REC0].lobby);
+        }
+    }
+}
+
 static void coop_activate(int i)
 {
     int port;
     char ip[64];
     sound(2);
+    if (s_co_steam && (i < 2 || (i >= CO_ADDR && i < CO_BACK && i != CO_JPORT))) { steam_activate(i); return; }
     if (i == 0) s_tf = TF_PORT;
     else if (i == 1) coop_host_toggle();
     else if (i >= CO_TAB0 && i < CO_ROW0) {
@@ -2393,12 +2470,7 @@ static void sk_grid(int base, int hy)
             if (c == 0) v = k_kind_name[s_sk[r].kind];
             else if (c == 1) v = k_race_name[s_sk[r].race];
             else { snprintf(nb, sizeof nb, "%d", c == 2 ? s_sk[r].spawn : s_sk[r].team); v = nb; }
-            if (off)
-                rrect(b->x0, b->y0, b->x1, b->y1, 13, 0x1B2A40u, 0x0F1826u, 0.85f, 0x3E5678u, 2);
-            else if (hot)
-                rrect(b->x0, b->y0, b->x1, b->y1, 13, 0x2A64B4u, 0x143A78u, 0.92f, C_EDGE_HOT, 2.2f);
-            else
-                rrect(b->x0, b->y0, b->x1, b->y1, 13, 0x1C3C70u, 0x0E2246u, 0.80f, C_EDGE_DIM, 2);
+            cell(b->x0, b->y0, b->x1, b->y1, hot, off);
             text(b->x0, b->y0, b->x1, b->y1, v, off ? C_TXT_OFF : hot ? C_TXT_HOT : C_TXT, F_BTN,
                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
@@ -2526,15 +2598,101 @@ static void coop_field(const Box *b, const char *label, const char *val, int hot
     snprintf(buf, sizeof buf, "%s%s", val, editing && (GetTickCount() / 400) % 2 ? "_" : "");
     button(b->x0, b->y0, b->x1, b->y1, label, hot, 0, NULL);
     if (right)
-        text(b->x0 + 60, b->y0, b->x1 - 8, b->y1, buf, editing ? C_GOLD : C_TXT_HOT, F_BTN,
+        text(b->x0 + 74, b->y0, b->x1 - 8, b->y1, buf, editing ? C_GOLD : C_TXT_HOT, F_BTN,
              DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
     else
-        text(b->x0 + 86, b->y0, b->x1 - 8, b->y1, buf, editing ? C_GOLD : C_TXT_HOT, F_BTN,
+        text(b->x0 + 100, b->y0, b->x1 - 8, b->y1, buf, editing ? C_GOLD : C_TXT_HOT, F_BTN,
              DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+}
+
+static void draw_coop_steam(void)
+{
+    const Box *cb = &s_box[0], *hb = &s_box[1], *ja = &s_box[CO_ADDR], *jt = &s_box[CO_JOIN];
+    int st = avp_coop_state(), role = avp_coop_role(), ss = avp_steam_status(), k, nf;
+    static const char *const races[3] = { "Marine", "Predator", "Alien" };
+    AvpSteamFriend fl[3];
+    const char *stt = avp_steam_text();
+    uint32_t sc = ss == AVP_STEAM_FAILED ? 0xFF6060u : ss == AVP_STEAM_READY ? 0x60E060u : C_GOLD;
+    avp_steam_want_friends(ss == AVP_STEAM_READY);
+    nf = avp_steam_friends(fl, 3);
+    panel(30, 52, 610, 458);
+    text(50, 58, 590, 94, "Co-op Campaign: Steam", C_TXT_HOT, F_TITLE, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    rrect(50, 96, 590, 98, 1, C_EDGE_DIM, C_EDGE_DIM, 1, 0, 0);
+    card(50, 106, 310, 434);
+    card(330, 106, 590, 434);
+    text(62, 112, 298, 168, "Host", C_GOLD, F_BTN, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    text(342, 112, 578, 168, "Join", C_GOLD, F_BTN, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    button(cb->x0, cb->y0, cb->x1, cb->y1, ss == AVP_STEAM_READY ? "Steam connected" : ss == AVP_STEAM_BUSY ? "Connecting" : "Connect to Steam",
+           s_sel == 0, disabled(0), NULL);
+    button(hb->x0, hb->y0, hb->x1, hb->y1, role == 1 && (st == 1 || st == 2) ? "Stop hosting" : "Host with Steam",
+           s_sel == 1, disabled(1), NULL);
+    if (coop_hosting()) {
+        for (k = 0; k < 3; k++) {
+            const Box *b = &s_box[CO_TAB0 + k];
+            button(b->x0, b->y0, b->x1, b->y1, races[k], s_sel == CO_TAB0 + k, 0, k == s_co_race ? "<" : NULL);
+        }
+        for (k = 0; k < CO_ROWS; k++) {
+            const Box *b = &s_box[CO_ROW0 + k];
+            int m = s_co_scroll + k;
+            if (m >= s_co_n) break;
+            button(b->x0, b->y0, b->x1, b->y1, avp_mission_title(s_co_list[m]), s_sel == CO_ROW0 + k, 0,
+                   s_co_list[m] == s_co_pick ? "*" : NULL);
+        }
+        button(s_box[CO_START].x0, s_box[CO_START].y0, s_box[CO_START].x1, s_box[CO_START].y1,
+               s_co_pick >= 0 && !avp_coop_peer_ready() ? "Waiting for ready" : "Start",
+               s_sel == CO_START, disabled(CO_START), NULL);
+        coop_status(1, 62, 172, 298, 232);
+    } else if (s_co_side == 1 && *avp_coop_state_text()) {
+        coop_status(1, 62, 264, 298, 330);
+    } else {
+        text(62, 264, 298, 330, *stt ? stt : "Connect to Steam to host or join.", *stt ? sc : C_TXT_OFF, F_BODY, DT_LEFT | DT_WORDBREAK);
+    }
+    coop_field(ja, "Code", s_code, s_sel == CO_ADDR, s_tf == TF_CODE, 0);
+    button(jt->x0, jt->y0, jt->x1, jt->y1,
+           role == 2 && st == 2 && avp_coop_guest_mission() ? (avp_coop_self_ready() ? "Not ready" : "Ready")
+           : role == 2 && (st == 1 || st == 2) ? "Cancel" : "Join with code",
+           s_sel == CO_JOIN, disabled(CO_JOIN), role == 2 && st == 2 && avp_coop_self_ready() ? "READY" : NULL);
+    if (s_co_side == 2 && *avp_coop_state_text()) coop_status(2, 342, 264, 578, 312);
+    else text(342, 264, 578, 312, "Enter the host's code, or pick a friend below.", C_TXT_OFF, F_BODY, DT_LEFT | DT_WORDBREAK);
+    text(342, 316, 578, 334, "Friends' lobbies", C_TXT_OFF, F_BODY, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    for (k = 0; k < nf; k++) {
+        const Box *b = &s_box[CO_REC0 + k];
+        button(b->x0, b->y0, b->x1, b->y1, fl[k].name, s_sel == CO_REC0 + k, 0, "Join");
+    }
+    if (!nf)
+        text(342, 338, 578, 360, ss == AVP_STEAM_READY ? "No friends in a lobby" : "Not connected", C_TXT_OFF, F_BODY, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    button(s_box[CO_BACK].x0, s_box[CO_BACK].y0, s_box[CO_BACK].x1, s_box[CO_BACK].y1, "Back", s_sel == CO_BACK, 0, NULL);
+    if (*s_sk_err) {
+        if (GetTickCount() - s_sk_err_t < 6000)
+            text(200, 440, 590, 464, s_sk_err, 0xFF6060u, F_BODY, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        else
+            *s_sk_err = 0;
+    }
+}
+
+static void steam_tick(void)
+{
+    static int scanned;
+    uint64_t l;
+    if (!scanned) {
+        scanned = 1;
+        avp_steam_scan_cmdline();
+    }
+    if (avp_steam_cmd_pending() && avp_steam_status() == AVP_STEAM_OFF) avp_steam_connect();
+    if (!g_avp_mainmenu || !avp_steam_take_join(&l)) return;
+    s_co_steam = 1;
+    s_coop_from = SCR_MAIN;
+    avp_skirmish_disarm();
+    go(SCR_COOP);
+    s_co_side = 2;
+    s_co_col = 1;
+    s_join_logged = 1;
+    avp_coop_join_steam_lobby((unsigned long long)l);
 }
 
 static void draw_screen(void)
 {
+    steam_tick();
     char buf[64];
     int i;
     column_update();
@@ -2569,7 +2727,7 @@ static void draw_screen(void)
         rrect(120, 154, 520, 156, 1, C_EDGE_DIM, C_EDGE_DIM, 1, 0, 0);
         for (k = 0; k < 2; k++) {
             int x0 = 120 + k * 205;
-            rrect(x0, 168, x0 + 195, 344, 10, 0x0E2246u, 0x081428u, 0.9f, C_EDGE_DIM, 1.5f);
+            card(x0, 168, x0 + 195, 344);
             text(x0 + 10, 174, x0 + 185, 204, nm[k], C_GOLD, F_BTN, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
             text(x0 + 10, 208, x0 + 185, 274, ds[k], C_TXT, F_BODY, DT_LEFT | DT_WORDBREAK);
             button(s_box[k * 2].x0, s_box[k * 2].y0, s_box[k * 2].x1, s_box[k * 2].y1, "Host", s_sel == k * 2, 0, NULL);
@@ -2596,7 +2754,7 @@ static void draw_screen(void)
         }
         snprintf(buf, sizeof buf, "%s%s", s_set.mport, s_tf == TF_PORT && (GetTickCount() / 400) % 2 ? "_" : "");
         button(pb->x0, pb->y0, pb->x1, pb->y1, "Port", s_sel == 0, 0, NULL);
-        text(pb->x0 + 60, pb->y0, pb->x1 - 8, pb->y1, buf, s_tf == TF_PORT ? C_GOLD : C_TXT_HOT, F_BTN,
+        text(pb->x0 + 74, pb->y0, pb->x1 - 8, pb->y1, buf, s_tf == TF_PORT ? C_GOLD : C_TXT_HOT, F_BTN,
              DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
         button(hb->x0, hb->y0, hb->x1, hb->y1, st == 1 || st == 2 ? "Stop hosting" : "Start hosting", s_sel == 1, 0, NULL);
         if (s_mode) {
@@ -2675,11 +2833,11 @@ static void draw_screen(void)
         rrect(100, 146, 540, 148, 1, C_EDGE_DIM, C_EDGE_DIM, 1, 0, 0);
         snprintf(buf, sizeof buf, "%s%s", s_ip, s_tf == TF_IP && (GetTickCount() / 400) % 2 ? "_" : "");
         button(ib->x0, ib->y0, ib->x1, ib->y1, "Address", s_sel == 0, 0, NULL);
-        text(ib->x0 + 90, ib->y0, ib->x1 - 8, ib->y1, buf, s_tf == TF_IP ? C_GOLD : C_TXT_HOT, F_BTN,
+        text(ib->x0 + 104, ib->y0, ib->x1 - 8, ib->y1, buf, s_tf == TF_IP ? C_GOLD : C_TXT_HOT, F_BTN,
              DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         snprintf(buf, sizeof buf, "%s%s", s_set.mport, s_tf == TF_PORT && (GetTickCount() / 400) % 2 ? "_" : "");
         button(pb->x0, pb->y0, pb->x1, pb->y1, "Port", s_sel == 1, 0, NULL);
-        text(pb->x0 + 60, pb->y0, pb->x1 - 8, pb->y1, buf, s_tf == TF_PORT ? C_GOLD : C_TXT_HOT, F_BTN,
+        text(pb->x0 + 74, pb->y0, pb->x1 - 8, pb->y1, buf, s_tf == TF_PORT ? C_GOLD : C_TXT_HOT, F_BTN,
              DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
         button(jb->x0, jb->y0, jb->x1, jb->y1, st == 1 || st == 2 ? "Cancel" : "Join", s_sel == 2, 0, NULL);
         if (join_go())
@@ -2731,8 +2889,19 @@ static void draw_screen(void)
         break;
     }
 
+    case SCR_COOPMODE: {
+        panel(150, 120, 490, 340);
+        text(170, 128, 470, 164, "Co-op Campaign", C_TXT_HOT, F_TITLE, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        rrect(170, 166, 470, 168, 1, C_EDGE_DIM, C_EDGE_DIM, 1, 0, 0);
+        button(s_box[0].x0, s_box[0].y0, s_box[0].x1, s_box[0].y1, "IP Connection", s_sel == 0, 0, NULL);
+        button(s_box[1].x0, s_box[1].y0, s_box[1].x1, s_box[1].y1, "Steam Connection", s_sel == 1, 0, NULL);
+        button(s_box[2].x0, s_box[2].y0, s_box[2].x1, s_box[2].y1, "Back", s_sel == 2, 0, NULL);
+        break;
+    }
+
     case SCR_COOP: {
         const Box *hp = &s_box[0], *ht = &s_box[1];
+        if (s_co_steam) { draw_coop_steam(); break; }
         const Box *ja = &s_box[CO_ADDR], *jp = &s_box[CO_JPORT], *jt = &s_box[CO_JOIN];
         int st = avp_coop_state(), role = avp_coop_role(), k, any = 0;
         static const char *const races[3] = { "Marine", "Predator", "Alien" };
@@ -2744,8 +2913,8 @@ static void draw_screen(void)
         panel(30, 52, 610, 458);
         text(50, 58, 590, 94, "Co-op Campaign", C_TXT_HOT, F_TITLE, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         rrect(50, 96, 590, 98, 1, C_EDGE_DIM, C_EDGE_DIM, 1, 0, 0);
-        rrect(50, 106, 310, 434, 12, 0x0E2246u, 0x081428u, 0.9f, C_EDGE_DIM, 1.5f);
-        rrect(330, 106, 590, 434, 12, 0x0E2246u, 0x081428u, 0.9f, C_EDGE_DIM, 1.5f);
+        card(50, 106, 310, 434);
+        card(330, 106, 590, 434);
         text(62, 112, 298, 168, "Host", C_GOLD, F_BTN, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         text(342, 112, 578, 168, "Join", C_GOLD, F_BTN, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         coop_field(hp, "Port", s_set.mport, s_sel == 0, s_tf == TF_PORT && s_sel == 0, 1);
@@ -2864,14 +3033,13 @@ static void draw_screen(void)
             Box *b = &s_box[i];
             int row = s_kb_scroll + i, a = s_kb_acts[row], sel = row == s_kb_pos;
             if (sel)
-                rrect(b->x0, b->y0, b->x1, b->y1, 6, 0x1C3C70u, 0x0E2246u, 0.8f, C_EDGE_DIM, 1.5f);
+                cell(b->x0, b->y0, b->x1, b->y1, 1, 0);
             text(b->x0 + 8, b->y0, KB_NAME_END - 4, b->y1, avp_keys_name(a), sel ? C_TXT_HOT : C_TXT, F_BODY,
                  DT_LEFT | DT_VCENTER | DT_SINGLELINE);
             for (c = 0; c < 2; c++) {
                 int x0 = c ? 436 : 330, x1 = c ? 536 : 430;
                 int hot = sel && c == s_kb_col, cap = hot && s_kb_cap;
-                rrect(x0, b->y0 + 1, x1, b->y1 - 1, 5, 0x0E2246u, 0x081428u, 0.9f,
-                      hot ? C_EDGE_HOT : C_EDGE_DIM, 1.5f);
+                cell(x0, b->y0 + 1, x1, b->y1 - 1, hot, 0);
                 text(x0, b->y0, x1, b->y1, cap ? "Press a key..." : avp_vk_name(avp_keys_vk(a, c)),
                      cap ? C_GOLD : sel ? C_TXT_HOT : C_TXT, F_BODY, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             }
@@ -2935,7 +3103,8 @@ static int visible(void)
 static void go(int screen)
 {
     if (s_screen == SCR_MAIN) s_sel_main = s_sel;
-    if (screen == SCR_SETTINGS && s_screen != SCR_KEYS && s_screen != SCR_COOP) s_set_scroll = 0;
+    if (screen == SCR_SETTINGS && s_screen != SCR_KEYS && s_screen != SCR_COOP && s_screen != SCR_COOPMODE) s_set_scroll = 0;
+    avp_steam_want_friends(0);
     s_screen = screen;
     s_sel = screen == SCR_MAIN ? s_sel_main : screen == SCR_QUIT ? 1 : 0;
     s_editing = 0;
@@ -2972,8 +3141,9 @@ static void go(int screen)
         if (!*s_ip) sscanf(s_set.recent[0], "%63[^: ]", s_ip);
         s_co_race = 0;
         coop_missions();
-        s_sel = s_co_side == 2 ? CO_JOIN : 1;
+        s_sel = s_co_side == 2 ? CO_JOIN : s_co_steam && avp_steam_status() != AVP_STEAM_READY ? 0 : 1;
     }
+    if (screen == SCR_COOPMODE) s_sel = s_co_steam;
     if (screen == SCR_KEYS) {
         kb_build();
         s_kb_pos = s_kb_col = s_kb_scroll = 0;
@@ -3001,6 +3171,11 @@ static void back(void)
         return;
     }
     if (s_screen == SCR_COOP) {
+        avp_coop_cancel();
+        go(SCR_COOPMODE);
+        return;
+    }
+    if (s_screen == SCR_COOPMODE) {
         avp_coop_cancel();
         if (s_coop_from == SCR_SETTINGS) {
             go(SCR_SETTINGS);
@@ -3119,9 +3294,9 @@ static void activate(int i)
             s_handoff_t = GetTickCount();
         } else {
             fprintf(stderr, "[PCMENU] %s\n", it->label);
-            if (it->screen == SCR_MP || it->screen == SCR_COOP)
+            if (it->screen == SCR_MP || it->screen == SCR_COOPMODE)
                 avp_skirmish_disarm();
-            if (it->screen == SCR_COOP)
+            if (it->screen == SCR_COOPMODE)
                 s_coop_from = SCR_MAIN;
             go(it->screen);
         }
@@ -3136,12 +3311,20 @@ static void activate(int i)
     case SCR_SKIRM: sk_activate(i); break;
     case SCR_EDITOR: ed_activate(i); break;
     case SCR_COOP: coop_activate(i); break;
+    case SCR_COOPMODE:
+        sound(2);
+        if (i == 2) { back(); break; }
+        if (s_co_steam != i) avp_coop_cancel();
+        s_co_steam = i;
+        avp_skirmish_disarm();
+        go(SCR_COOP);
+        break;
     case SCR_SETTINGS: {
         int id = row_id(i);
         sound(2);
         if (id == ST_BACK) back();
         else if (id == ST_KEYS) go(SCR_KEYS);
-        else if (id == ST_COOP) { s_coop_from = SCR_SETTINGS; go(SCR_COOP); }
+        else if (id == ST_COOP) { s_coop_from = SCR_SETTINGS; go(SCR_COOPMODE); }
         else if (id == ST_NAME) { if (s_editing) { s_editing = 0; settings_save(); } else s_editing = 1; }
         else change(id, +1);
         break;
@@ -3181,6 +3364,16 @@ static int disabled(int i)
 {
     if (s_screen == SCR_JOIN) return (i == 3 && !join_go()) || (i > 3 && i < 7 && !*s_set.recent[i - 4]);
     if (s_screen == SCR_HOST) return i == (s_mode ? 2 + SK_START : 2) && avp_coop_state() != 2;
+    if (s_screen == SCR_COOP && s_co_steam && (i < 2 || i >= CO_ADDR)) {
+        int ss = avp_steam_status(), st = avp_coop_state(), role = avp_coop_role(), active = st == 1 || st == 2;
+        AvpSteamFriend fl[3];
+        if (i == 0) return ss == AVP_STEAM_READY || ss == AVP_STEAM_BUSY;
+        if (i == 1) return ss != AVP_STEAM_READY && !(role == 1 && active);
+        if (i == CO_ADDR || i == CO_BACK) return 0;
+        if (i == CO_JPORT) return 1;
+        if (i == CO_JOIN) return ss != AVP_STEAM_READY && !(role == 2 && active);
+        return avp_steam_friends(fl, 3) <= i - CO_REC0;
+    }
     if (s_screen == SCR_COOP) {
         if (i >= CO_TAB0 && i <= CO_START) {
             if (!coop_hosting()) return 1;
@@ -3363,7 +3556,7 @@ static int input_hook(HWND h, UINT m, WPARAM w, LPARAM l)
         return 1;
     }
     if (!g_avp_pcmenu_up)
-        return avp_editor_key(m, w, l);
+        return m == WM_MOUSEWHEEL ? 0 : avp_editor_key(m, w, l);
 
     if (m == WM_KEYUP || m == WM_LBUTTONUP || m == WM_RBUTTONUP || m == WM_MBUTTONUP)
         return m == WM_KEYUP ? 0 : 1;

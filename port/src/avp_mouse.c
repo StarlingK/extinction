@@ -45,6 +45,7 @@ extern int avp_skirmish_armed(void);
 extern void avp_skirmish_disarm(void);
 extern volatile LONG g_avp_pcmenu_up;
 extern int avp_coop_give_selection(void);
+extern int avp_coop_is_static(uint32_t handle);
 extern int avp_coop_role(void);
 extern int avp_input_controller(void);
 
@@ -1309,7 +1310,7 @@ static int box_select(uint32_t ptr, float x0, float y0, float x1, float y1)
         h = G32(obj + 0x18);
         a[0] = h; a[1] = r; a[2] = tmp;
         unit = gcall(G32(vt + 0xC0), ptr, a, 3);
-        if (unit) {
+        if (unit && !avp_coop_is_static(G32(unit + 0x18))) {
             a[0] = ptr; a[1] = G32(unit + 0x18);
             gcall(AVP_SELECT_UNIT, ptr, a, 2);
             added++;

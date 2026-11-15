@@ -25,6 +25,7 @@ set(GAME_SOURCES
     src/avp_keys.c
     src/avp_coop.c
     src/avp_coop_proto.c
+    src/avp_steam.c
     src/avp_layout.c
     src/avp_skirmish.c
     src/avp_editor.c
@@ -33,6 +34,34 @@ set(GAME_SOURCES
     src/recomp_manual.c
 
 )
+
+set(AVP_STEAM_DIR "" CACHE PATH "Folder with the Steamworks redistributable (steam_api64.dll or libsteam_api.so) to embed; optional")
+set(AVP_STEAM_RC "")
+set(AVP_STEAM_SRC "")
+if(AVP_STEAM_DIR)
+    if(WIN32)
+        set(AVP_STEAM_FILE "${AVP_STEAM_DIR}/steam_api64.dll")
+    else()
+        set(AVP_STEAM_FILE "${AVP_STEAM_DIR}/libsteam_api.so")
+    endif()
+    if(EXISTS "${AVP_STEAM_FILE}")
+        file(SHA256 "${AVP_STEAM_FILE}" AVP_STEAM_SHA256)
+        message(STATUS "Embedding the Steam library (sha256 ${AVP_STEAM_SHA256})")
+        add_compile_definitions(AVP_STEAM_EMBED=1)
+        if(WIN32)
+            enable_language(RC)
+            set(AVP_STEAM_RC "${CMAKE_CURRENT_BINARY_DIR}/avp_steam.rc")
+            file(WRITE "${AVP_STEAM_RC}" "AVPSTEAM RCDATA \"${AVP_STEAM_FILE}\"\n")
+            set_source_files_properties("${AVP_STEAM_RC}" PROPERTIES OBJECT_DEPENDS "${AVP_STEAM_FILE}")
+        else()
+            set(AVP_STEAM_SRC "${CMAKE_CURRENT_BINARY_DIR}/avp_steam_blob.c")
+            file(WRITE "${AVP_STEAM_SRC}" "__asm__(\".section .rodata\\n.global avp_steam_blob_start\\n.global avp_steam_blob_end\\n.balign 16\\navp_steam_blob_start:\\n.incbin \\\"${AVP_STEAM_FILE}\\\"\\navp_steam_blob_end:\\n.byte 0\\n.previous\\n\");\n")
+            set_source_files_properties("${AVP_STEAM_SRC}" PROPERTIES OBJECT_DEPENDS "${AVP_STEAM_FILE}")
+        endif()
+    else()
+        message(STATUS "AVP_STEAM_DIR has no ${AVP_STEAM_FILE}; building without the Steam library")
+    endif()
+endif()
 
 if(WIN32)
     set(AVP_ICON_XBE "" CACHE FILEPATH "default.xbe to take the exe icon from")
@@ -55,12 +84,14 @@ if(WIN32)
         ${GAME_SOURCES}
         ${RECOMP_GEN_SOURCES}
         ${AVP_ICON_RC}
+        ${AVP_STEAM_RC}
     )
 else()
     list(REMOVE_ITEM GAME_SOURCES src/avp_launcher.c)
     add_executable(${PROJECT_NAME}
         ${GAME_SOURCES}
         ${RECOMP_GEN_SOURCES}
+        ${AVP_STEAM_SRC}
     )
     set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME AvPExtinction)
     set_source_files_properties(${RECOMP_GEN_SOURCES} PROPERTIES COMPILE_OPTIONS "-w")

@@ -56,3 +56,19 @@ recomp_0003.c	loc_0003C400	{ extern int avp_coop_block_death_h(uint32_t h); if (
 recomp_0009.c	loc_0007C620	{ extern int avp_coop_skip_ai(uint32_t ai); if (avp_coop_skip_ai(ecx)) { esp += 4; return; } }
 recomp_0016.c	loc_000BF700	{ extern int avp_coop_take_buy(uint32_t self); if (avp_coop_take_buy(eax)) { esp += 4; return; } }
 recomp_0005.c	loc_00050360	{ extern int avp_coop_take_reinf(uint32_t who, uint32_t esp); if (avp_coop_take_reinf(eax, esp)) { esp += 16; return; } }
+recomp_0002.c	loc_00027690	{ extern int avp_coop_factory_pre(uint32_t rec, uint32_t arg2); if (avp_coop_factory_pre(MEM32(esp + 4), MEM32(esp + 8))) { eax = 0; esp += 12; return; } }
+recomp_0002.c	loc_000276C3	{ extern void avp_coop_factory_post(uint32_t obj); avp_coop_factory_post(eax); }
+recomp_0002.c	loc_000276CF	{ extern void avp_coop_factory_post(uint32_t obj); avp_coop_factory_post(0); }
+recomp_0018.c	loc_000D6DC0	{ extern int avp_coop_classkey_pre(uint32_t key, uint32_t a, uint32_t b); if (avp_coop_classkey_pre(edi, MEM32(esp + 4), MEM32(esp + 8))) { eax = 0; esp += 12; return; } }
+recomp_0018.c	loc_000D6DDC	{ extern void avp_coop_classkey_post(uint32_t obj); avp_coop_classkey_post(eax); }
+recomp_0018.c	loc_000D6DDF	{ extern void avp_coop_classkey_post(uint32_t obj); avp_coop_classkey_post(0); }
+recomp_0019.c	loc_000D80DF	{ extern void avp_coop_msg15_begin(uint32_t msg); avp_coop_msg15_begin(ebx); }
+recomp_0019.c	loc_000D8141	{ extern void avp_coop_msg15_end(uint32_t obj, uint32_t msg); avp_coop_msg15_end(esi, ebx); }
+recomp_0016.c	loc_000BFBD0	{ extern int avp_coop_take_upgrade(uint32_t self); if (avp_coop_take_upgrade(ecx)) { SET_LO8(eax, 1); esp += 8; return; } }
+recomp_0000.c	loc_00017340	{ extern int avp_coop_tech_pre(uint32_t esp); if (avp_coop_tech_pre(esp)) { esp += 8; return; } }
+recomp_0005.c	loc_00052FE0	{ extern int avp_coop_tech2_pre(uint32_t self, uint32_t fn); if (avp_coop_tech2_pre(ecx, 0x00052FE0u)) { SET_LO8(eax, 1); esp += 4; return; } }
+recomp_0005.c	loc_00053360	{ extern int avp_coop_tech2_pre(uint32_t self, uint32_t fn); if (avp_coop_tech2_pre(ecx, 0x00053360u)) { SET_LO8(eax, 1); esp += 4; return; } }
+recomp_0025.c	loc_001474DA	{ extern int avp_rtti_bad(uint32_t esp); if (avp_rtti_bad(esp)) { eax = 0; esp += 4; return; } }
+recomp_0010.c	loc_0007F800	{ extern int avp_coop_mover_pre(uint32_t m); if (avp_coop_mover_pre(ecx)) { eax = 0; esp += 4; return; } }
+recomp_0010.c	loc_000802B0	{ extern int avp_coop_mover_pre(uint32_t m); if (avp_coop_mover_pre(ecx)) { eax = 0; esp += 4; return; } }
+recomp_0018.c	loc_000D7270	{ extern int avp_coop_parent_bad(uint32_t obj); if (avp_coop_parent_bad(ecx)) { esp += 4; return; } }

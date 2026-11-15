@@ -78,6 +78,25 @@ void recomp_icall_not_code_log(uint32_t va)
                     "(null or wild function pointer, at call #%llu)\n",
             va, (unsigned long long)hits[i],
             (unsigned long long)g_icall_count);
+    if (hits[i] <= 10 && g_xbox_mem_offset) {
+        uint32_t esp = (uint32_t)g_esp, k, shown = 0;
+        int j;
+        fprintf(stderr, "  this %08X, last calls:", (uint32_t)g_ecx);
+        for (j = 12; j < 16; j++) {
+            uint32_t t = g_icall_trace[(g_icall_trace_idx - 16 + (uint32_t)j) & 15];
+            if (t) fprintf(stderr, " 0x%08X", t);
+        }
+        fprintf(stderr, "\n  guest return addresses:");
+        if (esp >= 0x10000u && esp < 0x04000000u - 0x400u)
+            for (k = 0; k < 128u && shown < 8u; k++) {
+                uint32_t v = *(volatile uint32_t *)((uintptr_t)(esp + 4u * k) + (uintptr_t)g_xbox_mem_offset);
+                if (v >= 0x00011000u && v < 0x00170000u) {
+                    fprintf(stderr, " 0x%08X", v);
+                    shown++;
+                }
+            }
+        fprintf(stderr, "\n");
+    }
     fflush(stderr);
 }
 
