@@ -20,6 +20,11 @@
 # Features:
 
 - Co-Op  and lobby system.
+- Widescreen
+- Keybindings
+- Mouse Support
+- 30/60/144 FPS. 
+
 
 # Planned:
 
