@@ -9,6 +9,7 @@
 #include "avp_layout.h"
 #include "avp_skirmish.h"
 #include "avp_editor.h"
+#include "avp_layer.h"
 #ifndef _WIN32
 #include <SDL.h>
 #include <sys/stat.h>
@@ -18,6 +19,9 @@ typedef void (*xbox_fb_draw_hook)(uint32_t *rgb, int w, int h);
 typedef int (*xbox_fb_input_hook)(HWND h, UINT m, WPARAM w, LPARAM l);
 extern void xbox_FramebufferSetDrawHook(xbox_fb_draw_hook fn);
 extern void xbox_FramebufferSetInputHook(xbox_fb_input_hook fn);
+extern void xbox_FramebufferSetLayerHook(int slot, xbox_fb_layer_hook fn);
+extern int  xbox_FramebufferLayerReady(void);
+extern void avp_overlay_layer(XboxFbLayer *layer);
 extern int  xbox_FramebufferIsFullscreen(void);
 extern void xbox_FramebufferSetFullscreen(HWND h, int on);
 extern void xbox_FramebufferClientToFrame(HWND h, int cx, int cy, int *fx, int *fy);
@@ -284,7 +288,16 @@ static int dib_ensure(int w, int h)
 }
 #endif
 
-static uint32_t mix(uint32_t d, uint32_t c, float a)
+#define LW 640
+#define LH 480
+#define MAX_ITEMS 768
+
+static float s_S = 1.0f, s_ox, s_oy;
+static int s_alpha;
+
+typedef struct { int x0, y0, x1, y1; } Clip;
+
+static uint32_t mix_rgb(uint32_t d, uint32_t c, float a)
 {
     int dr = (int)((d >> 16) & 255), dg = (int)((d >> 8) & 255), db = (int)(d & 255);
     int cr = (int)((c >> 16) & 255), cg = (int)((c >> 8) & 255), cb = (int)(c & 255);
@@ -297,36 +310,195 @@ static uint32_t mix(uint32_t d, uint32_t c, float a)
     return ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
 }
 
-static uint32_t lerp_c(uint32_t a, uint32_t b, float t) { return mix(a, b, t); }
+static uint32_t over_px(uint32_t d, uint32_t c, float a)
+{
+    int a8, ia, r, g, b, al;
+    if (a <= 0) return d;
+    a8 = a >= 1 ? 255 : (int)(a * 255.0f + 0.5f);
+    if (a8 <= 0) return d;
+    ia = 255 - a8;
+    r = ((int)((c >> 16) & 255) * a8 + (int)((d >> 16) & 255) * ia + 127) / 255;
+    g = ((int)((c >> 8) & 255) * a8 + (int)((d >> 8) & 255) * ia + 127) / 255;
+    b = ((int)(c & 255) * a8 + (int)(d & 255) * ia + 127) / 255;
+    al = (255 * a8 + (int)(d >> 24) * ia + 127) / 255;
+    return ((uint32_t)al << 24) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+}
+
+static uint32_t mix(uint32_t d, uint32_t c, float a)
+{
+    return s_alpha ? over_px(d, c, a) : mix_rgb(d, c, a);
+}
+
+static uint32_t lerp_c(uint32_t a, uint32_t b, float t) { return mix_rgb(a, b, t); }
 
 static float clampf(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+
+static int dev_x(float x) { return (int)floorf(s_ox + x * s_S + 0.5f); }
+static int dev_y(float y) { return (int)floorf(s_oy + y * s_S + 0.5f); }
+
+enum { IT_RRECT, IT_PLATE, IT_THUMB, IT_TEXT };
+
+typedef struct {
+    int x0, y0, x1, y1, cut;
+    float rad, fa, bw;
+    uint32_t top, bot, edge, lit, shade;
+    const uint32_t *pix;
+} Shape;
+
+typedef struct {
+    int type, bx0, by0, bx1, by1;
+    uint32_t hash;
+    union { Shape sh; Text tx; } u;
+} Item;
+
+static Item s_item[MAX_ITEMS];
+static int s_nitem;
+
+static uint32_t hmix(uint32_t h, uint32_t v)
+{
+    h ^= v;
+    h *= 16777619u;
+    return h;
+}
+
+static uint32_t hflt(uint32_t h, float f)
+{
+    uint32_t v;
+    memcpy(&v, &f, 4);
+    return hmix(h, v);
+}
+
+static Item *item_new(int type)
+{
+    Item *it;
+    if (s_nitem >= MAX_ITEMS) return NULL;
+    it = &s_item[s_nitem++];
+    memset(it, 0, sizeof *it);
+    it->type = type;
+    return it;
+}
+
+static void shape_add(int type, int x0, int y0, int x1, int y1, int cut, float rad, uint32_t top, uint32_t bot,
+                      float fa, uint32_t edge, float bw, uint32_t lit, uint32_t shade, const uint32_t *pix)
+{
+    Item *it = item_new(type);
+    Shape *s;
+    uint32_t h = 2166136261u;
+    if (!it) return;
+    s = &it->u.sh;
+    s->x0 = x0; s->y0 = y0; s->x1 = x1; s->y1 = y1; s->cut = cut;
+    s->rad = rad; s->fa = fa; s->bw = bw;
+    s->top = top; s->bot = bot; s->edge = edge; s->lit = lit; s->shade = shade;
+    s->pix = pix;
+    it->bx0 = dev_x((float)x0) - 3; it->by0 = dev_y((float)y0) - 3;
+    it->bx1 = dev_x((float)x1) + 3; it->by1 = dev_y((float)y1) + 3;
+    h = hmix(h, (uint32_t)type);
+    h = hmix(h, (uint32_t)x0); h = hmix(h, (uint32_t)y0); h = hmix(h, (uint32_t)x1); h = hmix(h, (uint32_t)y1);
+    h = hmix(h, (uint32_t)cut); h = hflt(h, rad); h = hflt(h, fa); h = hflt(h, bw);
+    h = hmix(h, top); h = hmix(h, bot); h = hmix(h, edge); h = hmix(h, lit); h = hmix(h, shade);
+    if (pix) {
+        int i;
+        for (i = 0; i < AVP_THUMB_W * AVP_THUMB_H; i++)
+            h = hmix(h, pix[i]);
+    }
+    it->hash = h;
+}
 
 static void rrect(int x0, int y0, int x1, int y1, float rad,
                   uint32_t top, uint32_t bot, float fill_a, uint32_t edge, float bw)
 {
-    float cx = (x0 + x1) * 0.5f, cy = (y0 + y1) * 0.5f;
-    float hw = (x1 - x0) * 0.5f, hh = (y1 - y0) * 0.5f;
-    int x, y;
-    for (y = y0 - 1; y <= y1; y++) {
-        uint32_t fc;
-        if (y < 0 || y >= s_h) continue;
-        fc = lerp_c(top, bot, clampf((float)(y - y0) / (float)(y1 - y0 > 0 ? y1 - y0 : 1)));
-        for (x = x0 - 1; x <= x1; x++) {
-            float px, py, qx, qy, d, fa, ea;
+    shape_add(IT_RRECT, x0, y0, x1, y1, 0, rad, top, bot, fill_a, edge, bw, 0, 0, NULL);
+}
+
+static float dev_bw(float bw)
+{
+    if (bw <= 0) return 0;
+    bw *= s_S;
+    if (s_S >= 1.5f) bw = fmaxf(1.0f, floorf(bw + 0.5f));
+    return bw;
+}
+
+static void rrect_px(const Shape *s, const Clip *cl)
+{
+    float X0 = (float)dev_x((float)s->x0), Y0 = (float)dev_y((float)s->y0);
+    float X1 = (float)dev_x((float)s->x1), Y1 = (float)dev_y((float)s->y1);
+    float rad = s->rad * s_S, bw = dev_bw(s->bw), cx, cy, hw, hh, spanv;
+    int x, y, ya, yb, xa, xb;
+    if (X1 < X0 + 1 && s->x1 > s->x0) X1 = X0 + 1;
+    if (Y1 < Y0 + 1 && s->y1 > s->y0) Y1 = Y0 + 1;
+    cx = (X0 + X1) * 0.5f; cy = (Y0 + Y1) * 0.5f;
+    hw = (X1 - X0) * 0.5f; hh = (Y1 - Y0) * 0.5f;
+    spanv = Y1 - Y0 > 0 ? Y1 - Y0 : 1;
+    ya = (int)Y0 - 1; yb = (int)Y1;
+    xa = (int)X0 - 1; xb = (int)X1;
+    if (ya < cl->y0) ya = cl->y0;
+    if (yb > cl->y1 - 1) yb = cl->y1 - 1;
+    if (xa < cl->x0) xa = cl->x0;
+    if (xb > cl->x1 - 1) xb = cl->x1 - 1;
+    for (y = ya; y <= yb; y++) {
+        uint32_t fc = lerp_c(s->top, s->bot, clampf(((float)y - Y0) / spanv));
+        uint32_t *row = &s_px[(size_t)y * s_w];
+        float py = fabsf((float)y + 0.5f - cy) - (hh - rad);
+        float qy = py > 0 ? py : 0;
+        for (x = xa; x <= xb; x++) {
+            float px, qx, len, d, fa, ea;
             uint32_t *p;
-            if (x < 0 || x >= s_w) continue;
-            px = fabsf(x + 0.5f - cx) - (hw - rad);
-            py = fabsf(y + 0.5f - cy) - (hh - rad);
-            qx = px > 0 ? px : 0; qy = py > 0 ? py : 0;
-            d = sqrtf(qx * qx + qy * qy) + (px > py ? (px < 0 ? px : 0) : (py < 0 ? py : 0)) - rad;
+            px = fabsf((float)x + 0.5f - cx) - (hw - rad);
+            qx = px > 0 ? px : 0;
+            len = (qx > 0 || qy > 0) ? sqrtf(qx * qx + qy * qy) : 0.0f;
+            d = len + (px > py ? (px < 0 ? px : 0) : (py < 0 ? py : 0)) - rad;
             fa = clampf(0.5f - d);
             if (fa <= 0) continue;
-            p = &s_px[(size_t)y * s_w + x];
-            *p = mix(*p, fc, fa * fill_a);
+            p = &row[x];
+            *p = mix(*p, fc, fa * s->fa);
             if (bw > 0) {
                 ea = fa - clampf(0.5f - (d + bw));
-                if (ea > 0) *p = mix(*p, edge, ea);
+                if (ea > 0) *p = mix(*p, s->edge, ea);
             }
+        }
+    }
+}
+
+static void thumb_px(const Shape *s, const Clip *cl)
+{
+    int X0 = dev_x((float)s->x0), Y0 = dev_y((float)s->y0);
+    int X1 = dev_x((float)(s->x0 + AVP_THUMB_W)), Y1 = dev_y((float)(s->y0 + AVP_THUMB_H));
+    int x, y, xa = X0, xb = X1, ya = Y0, yb = Y1;
+    float kx, ky;
+    if (X1 <= X0 || Y1 <= Y0) return;
+    kx = (float)AVP_THUMB_W / (float)(X1 - X0);
+    ky = (float)AVP_THUMB_H / (float)(Y1 - Y0);
+    if (xa < cl->x0) xa = cl->x0;
+    if (xb > cl->x1) xb = cl->x1;
+    if (ya < cl->y0) ya = cl->y0;
+    if (yb > cl->y1) yb = cl->y1;
+    for (y = ya; y < yb; y++) {
+        float sy = ((float)(y - Y0) + 0.5f) * ky - 0.5f, fy;
+        int y0i = (int)floorf(sy), y1i;
+        fy = sy - (float)y0i;
+        y1i = y0i + 1;
+        if (y0i < 0) y0i = 0;
+        if (y1i < 0) y1i = 0;
+        if (y0i > AVP_THUMB_H - 1) y0i = AVP_THUMB_H - 1;
+        if (y1i > AVP_THUMB_H - 1) y1i = AVP_THUMB_H - 1;
+        for (x = xa; x < xb; x++) {
+            float sx = ((float)(x - X0) + 0.5f) * kx - 0.5f, fx;
+            int x0i = (int)floorf(sx), x1i, k;
+            uint32_t out = 0;
+            fx = sx - (float)x0i;
+            x1i = x0i + 1;
+            if (x0i < 0) x0i = 0;
+            if (x1i < 0) x1i = 0;
+            if (x0i > AVP_THUMB_W - 1) x0i = AVP_THUMB_W - 1;
+            if (x1i > AVP_THUMB_W - 1) x1i = AVP_THUMB_W - 1;
+            for (k = 0; k < 24; k += 8) {
+                float v = (float)((s->pix[y0i * AVP_THUMB_W + x0i] >> k) & 255) * (1 - fx) * (1 - fy)
+                        + (float)((s->pix[y0i * AVP_THUMB_W + x1i] >> k) & 255) * fx * (1 - fy)
+                        + (float)((s->pix[y1i * AVP_THUMB_W + x0i] >> k) & 255) * (1 - fx) * fy
+                        + (float)((s->pix[y1i * AVP_THUMB_W + x1i] >> k) & 255) * fx * fy;
+                out |= (uint32_t)(v + 0.5f) << k;
+            }
+            s_px[(size_t)y * s_w + x] = (out & 0x00FFFFFFu) | (s_alpha ? 0xFF000000u : 0u);
         }
     }
 }
@@ -346,7 +518,7 @@ static const int k_font_px[5] = { 19, 27, 15, 31, 46 };
 
 static void font_scale(int font, float *sx, float *sy)
 {
-    *sy = (float)k_font_px[font] * 0.72f / 7.0f;
+    *sy = (float)k_font_px[font] * 0.72f / 7.0f * s_S;
     *sx = *sy * 0.8f;
 }
 
@@ -520,16 +692,16 @@ static int gf_ready(void)
     return s_gf_state > 0;
 }
 
-static float gf_cap(int font) { return (float)k_font_px[font] * GF_CAP_K; }
+static float gf_cap(int font) { return (float)k_font_px[font] * GF_CAP_K * s_S; }
 
 static float gf_scale(int font)
 {
     static const float snap[] = { 0.5f, 1.0f, 1.5f, 2.0f };
-    float s = gf_cap(font) / (float)GF_CAP_H;
+    float s = (float)k_font_px[font] * GF_CAP_K / (float)GF_CAP_H;
     int i;
     for (i = 0; i < 4; i++)
-        if (fabsf(s - snap[i]) <= snap[i] * 0.12f) return snap[i];
-    return s;
+        if (fabsf(s - snap[i]) <= snap[i] * 0.12f) return snap[i] * s_S;
+    return s * s_S;
 }
 
 static float gf_adv(int ch, float s)
@@ -539,39 +711,120 @@ static float gf_adv(int ch, float s)
     return a < 1.0f ? 1.0f : a;
 }
 
-static float gf_sample(const uint8_t *a, float u, float v)
+typedef struct { int ch; float s; int w, h; uint8_t *a; } GfBmp;
+#define GF_BMPS 2048
+static GfBmp s_gb[GF_BMPS];
+static int s_gb_n;
+
+static float gf_texel(const GfGlyph *g, int tx, int ty)
 {
-    int x0 = (int)floorf(u - 0.5f), y0 = (int)floorf(v - 0.5f), x1, y1;
+    if (tx < 0 || ty < 0 || tx > 255 || ty > 255) return 0;
+    if (tx < (int)floorf(g->u) || tx >= (int)ceilf(g->u + g->w)) return 0;
+    if (ty < (int)floorf(g->v) || ty >= (int)ceilf(g->v + (float)GF_CELL_H)) return 0;
+    return (float)s_gtex[g->page][ty * 256 + tx] / 255.0f;
+}
+
+static float gf_sample_cell(const GfGlyph *g, float u, float v)
+{
+    int x0 = (int)floorf(u - 0.5f), y0 = (int)floorf(v - 0.5f);
     float fx = u - 0.5f - (float)x0, fy = v - 0.5f - (float)y0;
-    x1 = x0 + 1;
-    y1 = y0 + 1;
-    if (x0 < 0) x0 = 0;
-    if (y0 < 0) y0 = 0;
-    if (x1 < 0) x1 = 0;
-    if (y1 < 0) y1 = 0;
-    if (x0 > 255) x0 = 255;
-    if (y0 > 255) y0 = 255;
-    if (x1 > 255) x1 = 255;
-    if (y1 > 255) y1 = 255;
-    return ((float)a[y0 * 256 + x0] * (1 - fx) * (1 - fy) + (float)a[y0 * 256 + x1] * fx * (1 - fy) +
-            (float)a[y1 * 256 + x0] * (1 - fx) * fy + (float)a[y1 * 256 + x1] * fx * fy) / 255.0f;
+    return gf_texel(g, x0, y0) * (1 - fx) * (1 - fy) + gf_texel(g, x0 + 1, y0) * fx * (1 - fy) +
+           gf_texel(g, x0, y0 + 1) * (1 - fx) * fy + gf_texel(g, x0 + 1, y0 + 1) * fx * fy;
+}
+
+static void gf_bmp_free_all(void)
+{
+    int i;
+    for (i = 0; i < GF_BMPS; i++) {
+        free(s_gb[i].a);
+        s_gb[i].a = NULL;
+        s_gb[i].w = s_gb[i].h = 0;
+        s_gb[i].s = 0;
+    }
+    s_gb_n = 0;
+}
+
+static void gf_bmp_fill(GfBmp *e, int ch, float s)
+{
+    const GfGlyph *g = &s_gg[ch & 255];
+    float gw = g->w;
+    int bw = (int)ceilf(gw * s) + 1, bh = (int)ceilf((float)GF_CELL_H * s) + 1, i, j;
+    int native = fabsf(s - 1.0f) < 0.02f;
+    float k = 1.0f + (s - 1.0f) * 0.8f, t = 0.85f * clampf((s - 1.0f) / 0.5f);
+    uint8_t *a;
+    if (k > 5.0f) k = 5.0f;
+    e->ch = ch;
+    e->s = s;
+    e->w = e->h = 0;
+    e->a = NULL;
+    if (!g->has || bw < 1 || bh < 1) return;
+    a = (uint8_t *)calloc((size_t)bw * (size_t)bh, 1);
+    if (!a) return;
+    for (j = 0; j < bh; j++) {
+        for (i = 0; i < bw; i++) {
+            float acc = 0;
+            if (native) {
+                if ((float)i < gw && j < GF_CELL_H)
+                    acc = gf_texel(g, (int)(g->u + (float)i), (int)(g->v + (float)j));
+            } else if (s > 1.0f) {
+                float u = ((float)i + 0.5f) / s, v = ((float)j + 0.5f) / s;
+                if (u < gw && v < (float)GF_CELL_H) {
+                    float lin = gf_sample_cell(g, g->u + u, g->v + v);
+                    float steep = clampf((lin - 0.5f) * k + 0.5f);
+                    acc = lin + (steep - lin) * t;
+                }
+            } else {
+                int m, n;
+                for (n = 0; n < 3; n++) {
+                    float v = (((float)j + ((float)n + 0.5f) / 3.0f)) / s;
+                    if (v < 0 || v >= (float)GF_CELL_H) continue;
+                    for (m = 0; m < 3; m++) {
+                        float u = (((float)i + ((float)m + 0.5f) / 3.0f)) / s;
+                        if (u < 0 || u >= gw) continue;
+                        acc += gf_sample_cell(g, g->u + u, g->v + v);
+                    }
+                }
+                acc /= 9.0f;
+            }
+            a[j * bw + i] = (uint8_t)(clampf(acc) * 255.0f + 0.5f);
+        }
+    }
+    e->w = bw;
+    e->h = bh;
+    e->a = a;
+}
+
+static GfBmp *gf_bmp(int ch, float s)
+{
+    unsigned h, n;
+    int pass;
+    uint32_t sb;
+    memcpy(&sb, &s, 4);
+    for (pass = 0; pass < 2; pass++) {
+        h = ((unsigned)(ch & 255) * 2654435761u) ^ (sb * 40503u);
+        for (n = 0; n < GF_BMPS; n++) {
+            GfBmp *e = &s_gb[(h + n) & (GF_BMPS - 1)];
+            if (e->s == s && e->ch == (ch & 255) && (e->a || e->w == 0) && e->s != 0)
+                return e;
+            if (e->s == 0) {
+                if (s_gb_n >= GF_BMPS * 3 / 4) break;
+                gf_bmp_fill(e, ch & 255, s);
+                s_gb_n++;
+                return e;
+            }
+        }
+        gf_bmp_free_all();
+    }
+    return NULL;
 }
 
 static void gf_draw(int ch, float x, float base, float s, uint32_t color, float amul, const TextRect *clip)
 {
-    const GfGlyph *g = &s_gg[ch & 255];
-    float top, gw;
+    GfBmp *b = gf_bmp(ch, s);
+    int ox = (int)floorf(x + 0.5f), oy = (int)floorf(base - (float)GF_BASE * s + 0.5f);
     int px0, px1, py0, py1, px, py;
-    int native;
-    if (!g->has) return;
-    gw = g->w;
-    native = s == 1.0f;
-    x = roundf(x);
-    top = roundf(base - (float)GF_BASE * s);
-    px0 = (int)floorf(x);
-    px1 = (int)ceilf(x + gw * s);
-    py0 = (int)floorf(top);
-    py1 = (int)ceilf(top + (float)GF_CELL_H * s);
+    if (!b || !b->a) return;
+    px0 = ox; px1 = ox + b->w; py0 = oy; py1 = oy + b->h;
     if (px0 < clip->left) px0 = clip->left;
     if (py0 < clip->top) py0 = clip->top;
     if (px1 > clip->right) px1 = clip->right;
@@ -581,35 +834,14 @@ static void gf_draw(int ch, float x, float base, float s, uint32_t color, float 
     if (px1 > s_w) px1 = s_w;
     if (py1 > s_h) py1 = s_h;
     for (py = py0; py < py1; py++) {
+        const uint8_t *ar = b->a + (size_t)(py - oy) * (size_t)b->w - ox;
+        uint32_t *d = &s_px[(size_t)py * s_w];
         for (px = px0; px < px1; px++) {
-            float acc = 0;
-            int i, j;
-            if (native) {
-                int tu = (int)(g->u + (float)(px - (int)x)), tv = (int)(g->v + (float)(py - (int)top));
-                if (px - (int)x >= 0 && (float)(px - (int)x) < gw && py - (int)top >= 0 && py - (int)top < GF_CELL_H &&
-                    tu >= 0 && tu < 256 && tv >= 0 && tv < 256)
-                    acc = (float)s_gtex[g->page][tv * 256 + tu] / 255.0f;
-                acc *= amul;
-                if (acc > 0.004f) {
-                    uint32_t *d = &s_px[(size_t)py * s_w + px];
-                    *d = mix(*d, color, acc > 1.0f ? 1.0f : acc);
-                }
-                continue;
-            }
-            for (j = 0; j < 3; j++) {
-                float v = ((float)py + ((float)j + 0.5f) / 3.0f - top) / s;
-                if (v < 0 || v >= (float)GF_CELL_H) continue;
-                for (i = 0; i < 3; i++) {
-                    float u = ((float)px + ((float)i + 0.5f) / 3.0f - x) / s;
-                    if (u < 0 || u >= gw) continue;
-                    acc += gf_sample(s_gtex[g->page], g->u + u, g->v + v);
-                }
-            }
-            acc = acc / 9.0f * amul;
-            if (acc > 0.004f) {
-                uint32_t *d = &s_px[(size_t)py * s_w + px];
-                *d = mix(*d, color, acc > 1.0f ? 1.0f : acc);
-            }
+            unsigned v = ar[px];
+            float acc;
+            if (!v) continue;
+            acc = (float)v * (1.0f / 255.0f) * amul;
+            if (acc > 0.004f) d[px] = mix(d[px], color, acc > 1.0f ? 1.0f : acc);
         }
     }
 }
@@ -720,14 +952,28 @@ static int break_lines(const Text *t, Span *out, int max)
 
 typedef struct { int dx, dy; float a; int glow; } TextPass;
 
+static int pdev(int v)
+{
+    int d;
+    if (!v) return 0;
+    d = (int)floorf(fabsf((float)v) * s_S + 0.5f);
+    if (d < 1) d = 1;
+    return v < 0 ? -d : d;
+}
+
 static void soft_run(const Text *t, const Span *lines, int nl, float y0, float cap, float lh,
-                     const TextPass *ps, uint32_t col)
+                     const TextPass *ps, uint32_t col, const Clip *cl)
 {
     TextRect clip = t->r;
     uint32_t c = ps->glow ? t->gc : col;
-    int l, pad = t->fx == 2 ? 4 : 0;
+    int l, pad = t->fx == 2 ? (int)ceilf(4.0f * s_S) : 0;
     clip.left += ps->dx - pad; clip.right += ps->dx + pad;
     clip.top += ps->dy - pad; clip.bottom += ps->dy + pad;
+    if (clip.left < cl->x0) clip.left = cl->x0;
+    if (clip.top < cl->y0) clip.top = cl->y0;
+    if (clip.right > cl->x1) clip.right = cl->x1;
+    if (clip.bottom > cl->y1) clip.bottom = cl->y1;
+    if (clip.right <= clip.left || clip.bottom <= clip.top) return;
     for (l = 0; l < nl; l++) {
         const char *ls = t->s + lines[l].start;
         int len = lines[l].len;
@@ -740,84 +986,153 @@ static void soft_run(const Text *t, const Span *lines, int nl, float y0, float c
     }
 }
 
-static void soft_flush(void)
+static TextRect dev_rect(const TextRect *r)
 {
-    int i;
-    for (i = 0; i < s_ntext; i++) {
-        Text *t = &s_text[i];
-        Span lines[16];
-        int nl = (t->fmt & DT_SINGLELINE) ? 1 : break_lines(t, lines, 16), k, np = 0;
-        float lh = (float)k_font_px[t->font] * 1.25f;
-        float cap = s_gf_state > 0 ? gf_cap(t->font) : (float)k_font_px[t->font] * 0.72f;
-        float block = lh * (float)nl, y0;
-        TextPass ps[24];
-        if (nl == 1 && (t->fmt & DT_SINGLELINE)) {
-            lines[0].start = 0;
-            lines[0].len = (int)strlen(t->s);
-        }
-        y0 = (t->fmt & DT_VCENTER) ? (float)t->r.top + ((float)(t->r.bottom - t->r.top) - block) * 0.5f : (float)t->r.top;
-        if (t->fx == 2) {
+    TextRect o;
+    o.left = dev_x((float)r->left); o.top = dev_y((float)r->top);
+    o.right = dev_x((float)r->right); o.bottom = dev_y((float)r->bottom);
+    return o;
+}
+
+static void text_render(const Text *src, const Clip *cl)
+{
+    Text dt = *src;
+    const Text *t = &dt;
+    Span lines[16];
+    int nl, k, np = 0;
+    float lh = (float)k_font_px[t->font] * 1.25f * s_S;
+    float cap = s_gf_state > 0 ? gf_cap(t->font) : (float)k_font_px[t->font] * 0.72f * s_S;
+    float block, y0;
+    TextPass ps[64];
+    dt.r = dev_rect(&src->r);
+    nl = (t->fmt & DT_SINGLELINE) ? 1 : break_lines(t, lines, 16);
+    block = lh * (float)nl;
+    if (nl == 1 && (t->fmt & DT_SINGLELINE)) {
+        lines[0].start = 0;
+        lines[0].len = (int)strlen(t->s);
+    }
+    y0 = (t->fmt & DT_VCENTER) ? (float)t->r.top + ((float)(t->r.bottom - t->r.top) - block) * 0.5f : (float)t->r.top;
+    if (t->fx == 2) {
+        if (s_S < 1.75f) {
             static const int ring[8][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 }, { 1, 1 }, { -1, -1 }, { 1, -1 }, { -1, 1 } };
             for (k = 0; k < 8; k++) {
-                TextPass a = { 2 * ring[k][0], 2 * ring[k][1], 0.10f, 1 };
-                TextPass b = { ring[k][0], ring[k][1], 0.16f, 1 };
+                TextPass a, b;
+                a.dx = pdev(2 * ring[k][0]); a.dy = pdev(2 * ring[k][1]); a.a = 0.10f; a.glow = 1;
+                b.dx = pdev(ring[k][0]); b.dy = pdev(ring[k][1]); b.a = 0.16f; b.glow = 1;
+                ps[np++] = a;
+                ps[np++] = b;
+            }
+        } else {
+            int n = s_S < 3.2f ? 16 : 24;
+            float am = 8.0f / (float)n;
+            for (k = 0; k < n; k++) {
+                float ang = 6.2831853f * (float)k / (float)n, cs = cosf(ang), sn = sinf(ang);
+                TextPass a, b;
+                a.dx = (int)floorf(2.0f * s_S * cs + 0.5f); a.dy = (int)floorf(2.0f * s_S * sn + 0.5f);
+                a.a = 0.10f * am; a.glow = 1;
+                b.dx = (int)floorf(s_S * cs + 0.5f); b.dy = (int)floorf(s_S * sn + 0.5f);
+                b.a = 0.16f * am; b.glow = 1;
                 ps[np++] = a;
                 ps[np++] = b;
             }
         }
-        if (t->fx == 1) {
-            TextPass a = { 2, 2, 0.20f, 0 }, b = { 1, 2, 0.26f, 0 }, c = { 1, 1, 0.34f, 0 }, d = { 0, 1, 0.22f, 0 };
-            ps[np++] = a; ps[np++] = b; ps[np++] = c; ps[np++] = d;
-        } else {
-            TextPass a = { 1, 1, 0.70f, 0 }, b = { 1, 0, 0.30f, 0 }, c = { -1, 0, 0.30f, 0 }, d = { 0, -1, 0.30f, 0 };
-            ps[np++] = a; ps[np++] = b; ps[np++] = c; ps[np++] = d;
-        }
-        for (k = 0; k < np; k++)
-            soft_run(t, lines, nl, y0, cap, lh, &ps[k], 0u);
-        {
-            TextPass m = { 0, 0, 1.0f, 0 };
-            soft_run(t, lines, nl, y0, cap, lh, &m, t->c);
-        }
     }
-    s_ntext = 0;
+    if (t->fx == 1) {
+        TextPass a, b, c, d;
+        a.dx = pdev(2); a.dy = pdev(2); a.a = 0.20f; a.glow = 0;
+        b.dx = pdev(1); b.dy = pdev(2); b.a = 0.26f; b.glow = 0;
+        c.dx = pdev(1); c.dy = pdev(1); c.a = 0.34f; c.glow = 0;
+        d.dx = 0; d.dy = pdev(1); d.a = 0.22f; d.glow = 0;
+        ps[np++] = a; ps[np++] = b; ps[np++] = c; ps[np++] = d;
+    } else {
+        TextPass a, b, c, d;
+        a.dx = pdev(1); a.dy = pdev(1); a.a = 0.70f; a.glow = 0;
+        b.dx = pdev(1); b.dy = 0; b.a = 0.30f; b.glow = 0;
+        c.dx = pdev(-1); c.dy = 0; c.a = 0.30f; c.glow = 0;
+        d.dx = 0; d.dy = pdev(-1); d.a = 0.30f; d.glow = 0;
+        ps[np++] = a; ps[np++] = b; ps[np++] = c; ps[np++] = d;
+    }
+    for (k = 0; k < np; k++)
+        soft_run(t, lines, nl, y0, cap, lh, &ps[k], 0u, cl);
+    {
+        TextPass m;
+        m.dx = 0; m.dy = 0; m.a = 1.0f; m.glow = 0;
+        soft_run(t, lines, nl, y0, cap, lh, &m, t->c, cl);
+    }
 }
 
 #ifdef _WIN32
-static void gdi_flush(void)
+static void gdi_text(const Text *t)
 {
-    int i;
+    RECT sh = t->r;
     GdiFlush();
     SetBkMode(s_dc, TRANSPARENT);
-    for (i = 0; i < s_ntext; i++) {
-        Text *t = &s_text[i];
-        RECT sh = t->r;
-        SelectObject(s_dc, s_font[t->font]);
-        OffsetRect(&sh, 1, 1);
-        SetTextColor(s_dc, RGB(0, 0, 0));
-        DrawTextA(s_dc, t->s, -1, &sh, t->fmt | DT_NOPREFIX);
-        SetTextColor(s_dc, RGB((t->c >> 16) & 255, (t->c >> 8) & 255, t->c & 255));
-        DrawTextA(s_dc, t->s, -1, &t->r, t->fmt | DT_NOPREFIX);
-    }
+    SelectObject(s_dc, s_font[t->font]);
+    OffsetRect(&sh, 1, 1);
+    SetTextColor(s_dc, RGB(0, 0, 0));
+    DrawTextA(s_dc, t->s, -1, &sh, t->fmt | DT_NOPREFIX);
+    SetTextColor(s_dc, RGB((t->c >> 16) & 255, (t->c >> 8) & 255, t->c & 255));
+    DrawTextA(s_dc, t->s, -1, (RECT *)&t->r, t->fmt | DT_NOPREFIX);
     GdiFlush();
-    s_ntext = 0;
 }
+#endif
 
 static void text_flush(void)
 {
-    if (gf_ready()) {
-        GdiFlush();
-        soft_flush();
-    } else {
-        gdi_flush();
+    int i;
+    gf_ready();
+    for (i = 0; i < s_ntext; i++) {
+        Text *t = &s_text[i];
+        Item *it = item_new(IT_TEXT);
+        uint32_t h = 2166136261u;
+        const char *p;
+        int ex;
+        if (!it) break;
+        it->u.tx = *t;
+        ex = (int)ceilf((t->fx == 2 ? 6.0f : 3.0f) * s_S) + 2;
+        it->bx0 = dev_x((float)t->r.left) - ex; it->by0 = dev_y((float)t->r.top) - ex;
+        it->bx1 = dev_x((float)t->r.right) + ex; it->by1 = dev_y((float)t->r.bottom) + ex;
+        h = hmix(h, IT_TEXT);
+        h = hmix(h, (uint32_t)t->r.left); h = hmix(h, (uint32_t)t->r.top);
+        h = hmix(h, (uint32_t)t->r.right); h = hmix(h, (uint32_t)t->r.bottom);
+        h = hmix(h, t->c); h = hmix(h, t->gc); h = hmix(h, (uint32_t)t->font);
+        h = hmix(h, (uint32_t)t->fx); h = hmix(h, t->fmt);
+        for (p = t->s; *p; p++)
+            h = hmix(h, (uint32_t)(unsigned char)*p);
+        it->hash = h;
+    }
+    s_ntext = 0;
+}
+
+static void plate_px(const Shape *s, const Clip *cl);
+
+static void item_render(const Item *it, const Clip *cl)
+{
+    switch (it->type) {
+    case IT_RRECT: rrect_px(&it->u.sh, cl); break;
+    case IT_PLATE: plate_px(&it->u.sh, cl); break;
+    case IT_THUMB: thumb_px(&it->u.sh, cl); break;
+    case IT_TEXT:
+#ifdef _WIN32
+        if (s_gf_state <= 0) {
+            gdi_text(&it->u.tx);
+            break;
+        }
+#endif
+        text_render(&it->u.tx, cl);
+        break;
     }
 }
-#else
-static void text_flush(void)
+
+static void render_all(void)
 {
-    gf_ready();
-    soft_flush();
+    Clip c;
+    int i;
+    c.x0 = 0; c.y0 = 0; c.x1 = s_w; c.y1 = s_h;
+    for (i = 0; i < s_nitem; i++)
+        item_render(&s_item[i], &c);
+    s_nitem = 0;
 }
-#endif
 
 #define C_EDGE      0x3CC8E6u
 #define C_EDGE_DIM  0x2E7896u
@@ -876,29 +1191,45 @@ static void text_fx(int x0, int y0, int x1, int y1, const char *str, uint32_t c,
 static void plate(int x0, int y0, int x1, int y1, int cut, uint32_t top, uint32_t bot, float fill_a,
                   uint32_t edge, float bw, uint32_t lit, uint32_t shade)
 {
+    shape_add(IT_PLATE, x0, y0, x1, y1, cut, 0, top, bot, fill_a, edge, bw, lit, shade, NULL);
+}
+
+static void plate_px(const Shape *s, const Clip *cl)
+{
     const float k = 0.70710678f;
-    int x, y;
-    for (y = y0 - 1; y <= y1; y++) {
-        uint32_t fc;
-        if (y < 0 || y >= s_h) continue;
-        fc = lerp_c(top, bot, clampf((float)(y - y0) / (float)(y1 - y0 > 0 ? y1 - y0 : 1)));
-        for (x = x0 - 1; x <= x1; x++) {
+    float X0 = (float)dev_x((float)s->x0), Y0 = (float)dev_y((float)s->y0);
+    float X1 = (float)dev_x((float)s->x1), Y1 = (float)dev_y((float)s->y1);
+    float cut = (float)s->cut * s_S, bw = dev_bw(s->bw), hl = s_S >= 1.5f ? fmaxf(1.0f, floorf(s_S + 0.5f)) : 1.0f;
+    float spanv;
+    int x, y, ya, yb, xa, xb;
+    if (X1 < X0 + 1 && s->x1 > s->x0) X1 = X0 + 1;
+    if (Y1 < Y0 + 1 && s->y1 > s->y0) Y1 = Y0 + 1;
+    spanv = Y1 - Y0 > 0 ? Y1 - Y0 : 1;
+    ya = (int)Y0 - 1; yb = (int)Y1;
+    xa = (int)X0 - 1; xb = (int)X1;
+    if (ya < cl->y0) ya = cl->y0;
+    if (yb > cl->y1 - 1) yb = cl->y1 - 1;
+    if (xa < cl->x0) xa = cl->x0;
+    if (xb > cl->x1 - 1) xb = cl->x1 - 1;
+    for (y = ya; y <= yb; y++) {
+        uint32_t fc = lerp_c(s->top, s->bot, clampf(((float)y - Y0) / spanv));
+        uint32_t *row = &s_px[(size_t)y * s_w];
+        for (x = xa; x <= xb; x++) {
             float px = (float)x + 0.5f, py = (float)y + 0.5f, d, fa, ea;
             uint32_t *p;
-            if (x < 0 || x >= s_w) continue;
-            d = fmaxf(fmaxf((float)x0 - px, px - (float)x1), fmaxf((float)y0 - py, py - (float)y1));
-            d = fmaxf(d, ((float)cut - ((px - (float)x0) + (py - (float)y0))) * k);
-            d = fmaxf(d, ((float)cut - (((float)x1 - px) + ((float)y1 - py))) * k);
+            d = fmaxf(fmaxf(X0 - px, px - X1), fmaxf(Y0 - py, py - Y1));
+            d = fmaxf(d, (cut - ((px - X0) + (py - Y0))) * k);
+            d = fmaxf(d, (cut - ((X1 - px) + (Y1 - py))) * k);
             fa = clampf(0.5f - d);
             if (fa <= 0) continue;
-            p = &s_px[(size_t)y * s_w + x];
-            *p = mix(*p, fc, fa * fill_a);
+            p = &row[x];
+            *p = mix(*p, fc, fa * s->fa);
             if (bw > 0) {
                 ea = fa - clampf(0.5f - (d + bw));
-                if (ea > 0) *p = mix(*p, edge, ea);
-                if (d < -bw && d >= -bw - 1.0f) {
-                    float near_tl = (px - (float)x0) + (py - (float)y0), near_br = ((float)x1 - px) + ((float)y1 - py);
-                    *p = mix(*p, near_tl < near_br ? lit : shade, 0.5f);
+                if (ea > 0) *p = mix(*p, s->edge, ea);
+                if (d < -bw && d >= -bw - hl) {
+                    float near_tl = (px - X0) + (py - Y0), near_br = (X1 - px) + (Y1 - py);
+                    *p = mix(*p, near_tl < near_br ? s->lit : s->shade, 0.5f);
                 }
             }
         }
@@ -966,7 +1297,7 @@ enum { SCR_MAIN, SCR_MP, SCR_SKIRM, SCR_SETTINGS, SCR_QUIT, SCR_KEYS,
 typedef struct { const char *label; int game; int screen; const char *tag; int vis; } MainItem;
 static const MainItem k_main[] = {
     { "Campaign",       0, -1, NULL, 1 },
-    { "Co-op Campaign", -1, SCR_COOP, "Being worked on", 1 },
+    { "Co-op Campaign", -1, SCR_COOP, NULL, 1 },
     { "Multiplayer",    -1, SCR_MP, NULL, 0 },
     { "Skirmish vs AI", -1, SCR_SKIRM, NULL, 0 },
     { "Map Editor",     -1, SCR_EDITOR, NULL, 0 },
@@ -1037,7 +1368,7 @@ static char s_kb_err[96];
 static DWORD s_kb_err_t;
 
 static const int k_rows_all[] = { ST_DISPLAY, ST_RES, ST_CAP, ST_VSYNC, ST_WIDE, ST_STYLE, ST_INPUT, ST_EDGE, ST_GLIDE,
-                                  ST_KEYS, ST_NAME, ST_BACK };
+                                  ST_KEYS, ST_NAME, ST_COOP, ST_BACK };
 
 static const int *rows_of(int screen, int *n)
 {
@@ -1495,11 +1826,7 @@ static void map_preview(int x, int y, int k)
     if (!p->state)
         preview_fill(k);
     if (p->state > 0) {
-        int px, py;
-        for (py = 0; py < AVP_THUMB_H; py++)
-            for (px = 0; px < AVP_THUMB_W; px++)
-                if (x + px >= 0 && x + px < s_w && y + py >= 0 && y + py < s_h)
-                    s_px[(size_t)(y + py) * s_w + x + px] = p->px[py * AVP_THUMB_W + px];
+        shape_add(IT_THUMB, x, y, x + AVP_THUMB_W, y + AVP_THUMB_H, 0, 0, 0, 0, 0, 0, 0, 0, 0, p->px);
         rrect(x - 2, y - 2, x + AVP_THUMB_W + 2, y + AVP_THUMB_H + 2, 2, 0, 0, 0, C_EDGE_DIM, 2);
     } else {
         rrect(x, y, x + AVP_THUMB_W, y + AVP_THUMB_H, 4, 0x0A1A38u, 0x06112Au, 1.0f, C_EDGE_DIM, 2);
@@ -2137,12 +2464,6 @@ static void draw_main_bg(int sel)
     for (i = 0; i < n; i++) {
         const Box *bx = &s_box[i];
         const char *lb = main_item(i)->label;
-        if (main_item(i)->tag) {
-            plate(bx->x0, bx->y0, bx->x1, bx->y1, 9, 0x1B2A40u, 0x0F1826u, 0.50f, 0x3E5678u, 1.5f, 0x5A7898u, 0x040E20u);
-            text(bx->x0 + 24, bx->y0, bx->x1 - 10, bx->y1, i == sel ? main_item(i)->tag : lb, C_TXT_OFF, F_BTN,
-                 DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-            continue;
-        }
         if (d == 1) main_native(bx, lb, i == sel);
         else if (d == 3) main_minimal(bx, lb, i == sel);
         else if (d == 4) main_plate(bx, lb, i == sel);
@@ -2216,7 +2537,7 @@ static void draw_screen(void)
             s_nbox = kn;
             text_flush();
         }
-        rrect(0, 0, s_w, s_h, 0, 0, 0, 0.35f, 0, 0);
+        rrect(0, 0, LW, LH, 0, 0, 0, 0.35f, 0, 0);
     }
     layout();
     switch (s_screen) {
@@ -2510,7 +2831,7 @@ static void draw_screen(void)
              hot == ST_NAME ? (s_editing ? "Type a name, Enter to finish" : "Enter to change the name")
              : hot == ST_STYLE ? "Original shows the game's own menu"
              : hot == ST_INPUT && s_set.input_ctl ? "Controller: the mouse is off in missions"
-             : hot == ST_CAP ? "Presentation only, game speed is unchanged"
+             : hot == ST_CAP ? ""
              : hot == ST_RES && s_set.dmode == 1 ? "Borderless always uses the desktop size"
              : is_value_row(hot) ? "Arrows or click to change"
              : hot == ST_BACK ? "Esc to go back" : "Click or Enter to open",
@@ -2773,8 +3094,6 @@ static void activate(int i)
     switch (s_screen) {
     case SCR_MAIN:
         it = main_item(i);
-        if (it->tag)
-            break;
         if (it->game < 0)
             sound(2);
         if (it->game >= 0 && it->game <= 2)
@@ -3158,6 +3477,12 @@ static int input_hook(HWND h, UINT m, WPARAM w, LPARAM l)
 
 extern void avp_overlay_draw(uint32_t *rgb, int w, int h);
 static int s_menu_off;
+static int s_up_now;
+
+static int hires_ok(void)
+{
+    return xbox_FramebufferLayerReady() && gf_ready();
+}
 
 static void draw_hook(uint32_t *rgb, int w, int h)
 {
@@ -3178,7 +3503,8 @@ static void draw_hook(uint32_t *rgb, int w, int h)
         s_was_up = up;
     }
     InterlockedExchange(&g_avp_pcmenu_up, up);
-    if (!up || !dib_ensure(w, h))
+    s_up_now = up;
+    if (!up)
         return;
     {
         static int seen_mode = -1;
@@ -3192,10 +3518,105 @@ static void draw_hook(uint32_t *rgb, int w, int h)
             }
         }
     }
+    if (hires_ok() || !dib_ensure(w, h))
+        return;
     memcpy(s_px, rgb, (size_t)w * h * 4);
+    s_nitem = 0;
+    s_ntext = 0;
     draw_screen();
     text_flush();
+    render_all();
     memcpy(rgb, s_px, (size_t)w * h * 4);
+}
+
+typedef struct { uint32_t hash; int x0, y0, x1, y1; } PrevItem;
+static PrevItem s_pv[MAX_ITEMS];
+static int s_npv;
+static int s_pgeom[6];
+static uint32_t *s_ppx;
+
+static void clip_union(Clip *d, int x0, int y0, int x1, int y1)
+{
+    if (x0 < d->x0) d->x0 = x0;
+    if (y0 < d->y0) d->y0 = y0;
+    if (x1 > d->x1) d->x1 = x1;
+    if (y1 > d->y1) d->y1 = y1;
+}
+
+static void layer_hook(XboxFbLayer *L)
+{
+    uint32_t *sp = s_px;
+    int sw = s_w, sh = s_h, geom[6], force, i, n, y;
+    Clip D, C;
+    if (!hires_ok())
+        return;
+    geom[0] = L->vx; geom[1] = L->vy; geom[2] = L->vw; geom[3] = L->vh; geom[4] = L->w; geom[5] = L->h;
+    s_px = L->px; s_w = L->w; s_h = L->h;
+    s_alpha = 1;
+    s_S = (float)L->vh / (float)LH;
+    s_ox = (float)L->vx;
+    s_oy = (float)L->vy;
+    s_nitem = 0;
+    s_ntext = 0;
+    if (s_up_now && !s_menu_off) {
+        draw_screen();
+        text_flush();
+    }
+    n = s_nitem;
+    force = L->full || L->px != s_ppx || memcmp(geom, s_pgeom, sizeof geom) != 0;
+    if (L->full || L->px != s_ppx)
+        s_npv = 0;
+    D.x0 = D.y0 = 0x7FFFFFFF;
+    D.x1 = D.y1 = -0x7FFFFFFF;
+    C = D;
+    for (i = 0; i < n; i++) {
+        const Item *it = &s_item[i];
+        clip_union(&C, it->bx0, it->by0, it->bx1, it->by1);
+        if (force || i >= s_npv || s_pv[i].hash != it->hash) {
+            clip_union(&D, it->bx0, it->by0, it->bx1, it->by1);
+            if (i < s_npv)
+                clip_union(&D, s_pv[i].x0, s_pv[i].y0, s_pv[i].x1, s_pv[i].y1);
+        }
+    }
+    for (i = n; i < s_npv; i++)
+        clip_union(&D, s_pv[i].x0, s_pv[i].y0, s_pv[i].x1, s_pv[i].y1);
+    if (force)
+        for (i = 0; i < s_npv && i < n; i++)
+            clip_union(&D, s_pv[i].x0, s_pv[i].y0, s_pv[i].x1, s_pv[i].y1);
+    if (D.x0 < 0) D.x0 = 0;
+    if (D.y0 < 0) D.y0 = 0;
+    if (D.x1 > L->w) D.x1 = L->w;
+    if (D.y1 > L->h) D.y1 = L->h;
+    if (C.x0 < 0) C.x0 = 0;
+    if (C.y0 < 0) C.y0 = 0;
+    if (C.x1 > L->w) C.x1 = L->w;
+    if (C.y1 > L->h) C.y1 = L->h;
+    if (D.x1 > D.x0 && D.y1 > D.y0) {
+        for (y = D.y0; y < D.y1; y++)
+            memset(L->px + (size_t)y * (size_t)L->w + D.x0, 0, (size_t)(D.x1 - D.x0) * 4);
+        for (i = 0; i < n; i++) {
+            const Item *it = &s_item[i];
+            if (it->bx1 > D.x0 && it->bx0 < D.x1 && it->by1 > D.y0 && it->by0 < D.y1)
+                item_render(it, &D);
+        }
+        L->dx0 = D.x0; L->dy0 = D.y0; L->dx1 = D.x1; L->dy1 = D.y1;
+    }
+    if (C.x1 > C.x0 && C.y1 > C.y0) {
+        L->cx0 = C.x0; L->cy0 = C.y0; L->cx1 = C.x1; L->cy1 = C.y1;
+    }
+    for (i = 0; i < n; i++) {
+        s_pv[i].hash = s_item[i].hash;
+        s_pv[i].x0 = s_item[i].bx0; s_pv[i].y0 = s_item[i].by0;
+        s_pv[i].x1 = s_item[i].bx1; s_pv[i].y1 = s_item[i].by1;
+    }
+    s_npv = n;
+    memcpy(s_pgeom, geom, sizeof geom);
+    s_ppx = L->px;
+    s_nitem = 0;
+    s_alpha = 0;
+    s_S = 1.0f;
+    s_ox = s_oy = 0;
+    s_px = sp; s_w = sw; s_h = sh;
 }
 
 int avp_pcmenu_hides_game(void)
@@ -3207,6 +3628,8 @@ void avp_pcmenu_init(void)
 {
     const char *e = getenv("AVP_PCMENU");
     xbox_FramebufferSetDrawHook(draw_hook);
+    xbox_FramebufferSetLayerHook(0, avp_overlay_layer);
+    xbox_FramebufferSetLayerHook(1, layer_hook);
     if (e && e[0] == '0') {
         s_menu_off = 1;
         fprintf(stderr, "[PCMENU] off\n");

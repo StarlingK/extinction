@@ -275,6 +275,14 @@ void avp_wide_narrow(void)
     s_applied = 0;
 }
 
+void avp_wide_render(int begin)
+{
+    if (begin)
+        avp_wide_viewports();
+    else
+        avp_wide_narrow();
+}
+
 void avp_wide_frame(void)
 {
     LONG req = InterlockedExchange(&s_req, -1);

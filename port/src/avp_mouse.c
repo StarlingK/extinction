@@ -16,11 +16,13 @@ extern ptrdiff_t g_xbox_mem_offset;
 
 #include "avp_keys.h"
 #include "avp_editor.h"
+#include "avp_layer.h"
 
 typedef void (*avp_guest_fn)(void);
 extern avp_guest_fn recomp_lookup(uint32_t xbox_va);
 
 extern int  xbox_FramebufferMouse(int *fx, int *fy);
+extern int  xbox_FramebufferLayerReady(void);
 extern int  avp_wide_inset(void);
 extern int  avp_wide_width(void);
 extern void avp_wide_frame(void);
@@ -44,7 +46,6 @@ extern void avp_skirmish_disarm(void);
 extern volatile LONG g_avp_pcmenu_up;
 extern int avp_coop_give_selection(void);
 extern int avp_coop_role(void);
-extern int avp_coop_marker(uint32_t crc, const float *pos);
 extern int avp_input_controller(void);
 
 #define G32(a) (*(volatile uint32_t *)((uintptr_t)(uint32_t)(a) + (uintptr_t)g_xbox_mem_offset))
@@ -690,6 +691,71 @@ static uint32_t blend(uint32_t dst, uint32_t src, float a)
     return out;
 }
 
+static uint32_t *ov_buf;
+static int ov_bw, ov_bh, ov_hi, ov_ox, ov_oy;
+static float ov_S = 1.0f;
+static int ov_bx0, ov_by0, ov_bx1, ov_by1;
+
+static void ov_reset_box(void)
+{
+    ov_bx0 = ov_by0 = 0x7FFFFFFF;
+    ov_bx1 = ov_by1 = -0x7FFFFFFF;
+}
+
+static void ov_touch(int x0, int y0, int x1, int y1)
+{
+    if (x0 < ov_bx0) ov_bx0 = x0;
+    if (y0 < ov_by0) ov_by0 = y0;
+    if (x1 > ov_bx1) ov_bx1 = x1;
+    if (y1 > ov_by1) ov_by1 = y1;
+}
+
+static uint32_t ov_mix(uint32_t d, uint32_t c, float a)
+{
+    int a8, ia;
+    if (!ov_hi)
+        return blend(d, c, a);
+    if (a <= 0.0f)
+        return d;
+    a8 = a >= 1.0f ? 255 : (int)(a * 255.0f + 0.5f);
+    ia = 255 - a8;
+    return ((uint32_t)((255 * a8 + (int)(d >> 24) * ia + 127) / 255) << 24)
+         | ((uint32_t)((((int)((c >> 16) & 255)) * a8 + (int)((d >> 16) & 255) * ia + 127) / 255) << 16)
+         | ((uint32_t)((((int)((c >> 8) & 255)) * a8 + (int)((d >> 8) & 255) * ia + 127) / 255) << 8)
+         | (uint32_t)((((int)(c & 255)) * a8 + (int)(d & 255) * ia + 127) / 255);
+}
+
+static void ov_put(int x, int y, uint32_t col, float a)
+{
+    int X0, X1, Y0, Y1, xx, yy;
+    if (!ov_hi) {
+        uint32_t *p;
+        if (x < 0 || y < 0 || x >= ov_bw || y >= ov_bh)
+            return;
+        p = &ov_buf[(size_t)y * ov_bw + x];
+        *p = a >= 1.0f ? col : blend(*p, col, a);
+        return;
+    }
+    X0 = ov_ox + (int)floorf((float)x * ov_S + 0.5f);
+    X1 = ov_ox + (int)floorf((float)(x + 1) * ov_S + 0.5f);
+    Y0 = ov_oy + (int)floorf((float)y * ov_S + 0.5f);
+    Y1 = ov_oy + (int)floorf((float)(y + 1) * ov_S + 0.5f);
+    if (X1 <= X0) X1 = X0 + 1;
+    if (Y1 <= Y0) Y1 = Y0 + 1;
+    if (X0 < 0) X0 = 0;
+    if (Y0 < 0) Y0 = 0;
+    if (X1 > ov_bw) X1 = ov_bw;
+    if (Y1 > ov_bh) Y1 = ov_bh;
+    if (X1 <= X0 || Y1 <= Y0)
+        return;
+    for (yy = Y0; yy < Y1; yy++)
+        for (xx = X0; xx < X1; xx++) {
+            uint32_t *p = &ov_buf[(size_t)yy * ov_bw + xx];
+            *p = ov_mix(*p, col & 0x00FFFFFFu, a);
+        }
+    ov_touch(X0, Y0, X1, Y1);
+}
+
 static float band(float d, float lo, float hi)
 {
     float a = d - lo + 0.75f, b = hi - d + 0.75f;
@@ -700,45 +766,186 @@ static float band(float d, float lo, float hi)
 
 extern int avp_coop_marked(uint32_t handle);
 
-static void coop_marks(uint32_t *rgb, int w, int h)
+#define CM_MAX 96
+typedef struct { uint32_t h; float x, y; ULONGLONG seen; int kind; } CoopMark;
+static CoopMark s_cm[2][CM_MAX];
+static int s_cm_n[2];
+static volatile LONG s_cm_cur;
+
+static void coop_marks_snap(void)
 {
     uint32_t end = G32(AVP_REGIONS_END), e;
-    for (e = AVP_REGIONS; end > e && end - AVP_REGIONS < 20u * 8192u && e + 20 <= end; e += 20) {
-        int cx, cy, dx, dy;
-        if (!G32(e) || !avp_coop_marked(G32(e)))
+    int src = (int)s_cm_cur, dst = src ^ 1, n = 0, i, j;
+    ULONGLONG now = GetTickCount64();
+    CoopMark *o = s_cm[src], *d = s_cm[dst];
+    for (e = AVP_REGIONS; end > e && end - AVP_REGIONS < 20u * 8192u && e + 20 <= end && n < CM_MAX; e += 20) {
+        uint32_t h = G32(e);
+        float cx, cy;
+        int kind = h ? avp_coop_marked(h) : 0;
+        if (!kind)
             continue;
-        cx = ((int)G32(e + 4) + (int)G32(e + 12)) / 2;
-        cy = (int)G32(e + 8) - 5;
-        for (dy = -3; dy <= 3; dy++)
-            for (dx = -3; dx <= 3; dx++) {
-                int ad = (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy), x = cx + dx, y = cy + dy;
-                if (ad > 3 || x < 0 || y < 0 || x >= w || y >= h)
+        cx = (float)((int)G32(e + 4) + (int)G32(e + 12)) * 0.5f;
+        cy = (float)(int)G32(e + 8) - 7.0f;
+        for (j = 0; j < n && d[j].h != h; j++)
+            ;
+        if (j < n)
+            continue;
+        for (i = 0; i < s_cm_n[src] && o[i].h != h; i++)
+            ;
+        if (i < s_cm_n[src] && now - o[i].seen < 400) {
+            cx = o[i].x + (cx - o[i].x) * 0.5f;
+            cy = o[i].y + (cy - o[i].y) * 0.5f;
+        }
+        d[n].h = h; d[n].x = cx; d[n].y = cy; d[n].seen = now; d[n].kind = kind;
+        n++;
+    }
+    for (i = 0; i < s_cm_n[src] && n < CM_MAX; i++) {
+        if (now - o[i].seen >= 250)
+            continue;
+        for (j = 0; j < n && d[j].h != o[i].h; j++)
+            ;
+        if (j == n && (o[i].kind = avp_coop_marked(o[i].h)) != 0)
+            d[n++] = o[i];
+    }
+    s_cm_n[dst] = n;
+    InterlockedExchange(&s_cm_cur, dst);
+}
+
+static void coop_marks(uint32_t *rgb, int w, int h)
+{
+    int cur = (int)s_cm_cur, n = s_cm_n[cur], i, dx, dy;
+    const CoopMark *m = s_cm[cur];
+    (void)rgb;
+    for (i = 0; i < n; i++) {
+        int cx = (int)floorf(m[i].x + 0.5f), cy = (int)floorf(m[i].y + 0.5f);
+        if (m[i].kind == 2) {
+            for (dy = -1; dy <= 3; dy++)
+                for (dx = -3; dx <= 3; dx++) {
+                    int ax = dx < 0 ? -dx : dx, x = cx + dx, y = cy + dy, in;
+                    if (x < 0 || y < 0 || x >= w || y >= h)
+                        continue;
+                    in = dy >= 0 && dy <= 2 && ax <= 2 - dy;
+                    if (in)
+                        ov_put(x, y, dy == 0 ? 0x0090FF90u : 0x0030C040u, 1.0f);
+                    else if (dy >= -1 && dy <= 3 && ax <= 3 - (dy < 0 ? 0 : dy))
+                        ov_put(x, y, 0x00081408u, 0.85f);
+                }
+            continue;
+        }
+        for (dy = -1; dy <= 4; dy++)
+            for (dx = -5; dx <= 5; dx++) {
+                int ax = dx < 0 ? -dx : dx, x = cx + dx, y = cy + dy, in, edge;
+                if (x < 0 || y < 0 || x >= w || y >= h)
                     continue;
-                rgb[y * w + x] = ad == 3 ? 0x00101010u : 0x00FFD040u;
+                in = dy >= 0 && dy <= 3 && ax <= 4 - dy;
+                edge = !in && dy >= -1 && dy <= 4 && ax <= 5 - (dy < 0 ? 0 : dy);
+                if (in)
+                    ov_put(x, y, dy == 0 ? 0x00B8F4FFu : 0x0046C8F0u, 1.0f);
+                else if (edge)
+                    ov_put(x, y, 0x00081420u, 0.85f);
             }
     }
 }
 
 static int s_in_mission;
 static void group_bar_draw(uint32_t *rgb, int w, int h);
+static void marks_draw(int w, int h);
+static void coop_banner_draw(int w, int h);
+
+static void ov_legacy(uint32_t *rgb, int w, int h)
+{
+    ov_buf = rgb;
+    ov_bw = w;
+    ov_bh = h;
+    ov_hi = 0;
+    ov_S = 1.0f;
+    ov_ox = ov_oy = 0;
+}
 
 void avp_overlay_draw(uint32_t *rgb, int w, int h)
 {
     static ULONGLONG ptr_since;
+    int hi = xbox_FramebufferLayerReady();
     if (!s_in_mission || g_avp_pcmenu_up)
         ptr_since = 0;
     else if (!ptr_since)
         ptr_since = GetTickCount64();
     else if (GetTickCount64() - ptr_since >= 5000)
         avp_skirmish_capture(rgb, w, h);
-    coop_marks(rgb, w, h);
-    group_bar_draw(rgb, w, h);
+    ov_legacy(rgb, w, h);
+    if (!hi) {
+        coop_marks(rgb, w, h);
+        group_bar_draw(rgb, w, h);
+    }
     avp_skirmish_draw(rgb, w, h);
     avp_editor_draw(rgb, w, h);
+    if (!hi) {
+        ov_legacy(rgb, w, h);
+        marks_draw(w, h);
+        coop_banner_draw(w, h);
+    }
+}
+
+void avp_overlay_layer(XboxFbLayer *L)
+{
+    static int pv[4];
+    static uint32_t *ppx;
+    int x0, y0, x1, y1, y;
+    if (L->full || L->px != ppx)
+        pv[0] = pv[1] = pv[2] = pv[3] = 0;
+    x0 = pv[0] < 0 ? 0 : pv[0]; y0 = pv[1] < 0 ? 0 : pv[1];
+    x1 = pv[2] > L->w ? L->w : pv[2]; y1 = pv[3] > L->h ? L->h : pv[3];
+    for (y = y0; y < y1 && x1 > x0; y++)
+        memset(L->px + (size_t)y * (size_t)L->w + x0, 0, (size_t)(x1 - x0) * 4);
+    ov_buf = L->px;
+    ov_bw = L->w;
+    ov_bh = L->h;
+    ov_hi = 1;
+    ov_S = (float)L->vh / 480.0f;
+    ov_ox = L->vx;
+    ov_oy = L->vy;
+    ov_reset_box();
+    coop_marks(NULL, 640, 480);
+    group_bar_draw(NULL, 640, 480);
+    marks_draw(640, 480);
+    coop_banner_draw(640, 480);
+    ov_hi = 0;
+    ov_S = 1.0f;
+    ov_ox = ov_oy = 0;
+    ov_buf = NULL;
+    if (ov_bx0 < 0) ov_bx0 = 0;
+    if (ov_by0 < 0) ov_by0 = 0;
+    if (ov_bx1 > L->w) ov_bx1 = L->w;
+    if (ov_by1 > L->h) ov_by1 = L->h;
+    if (ov_bx1 > ov_bx0 && ov_by1 > ov_by0) {
+        L->cx0 = ov_bx0; L->cy0 = ov_by0; L->cx1 = ov_bx1; L->cy1 = ov_by1;
+        pv[0] = ov_bx0; pv[1] = ov_by0; pv[2] = ov_bx1; pv[3] = ov_by1;
+    } else {
+        pv[0] = pv[1] = pv[2] = pv[3] = 0;
+    }
+    L->dx0 = L->cx0; L->dy0 = L->cy0; L->dx1 = L->cx1; L->dy1 = L->cy1;
+    if (x1 > x0 && y1 > y0) {
+        if (L->dx1 <= L->dx0) {
+            L->dx0 = x0; L->dy0 = y0; L->dx1 = x1; L->dy1 = y1;
+        } else {
+            if (x0 < L->dx0) L->dx0 = x0;
+            if (y0 < L->dy0) L->dy0 = y0;
+            if (x1 > L->dx1) L->dx1 = x1;
+            if (y1 > L->dy1) L->dy1 = y1;
+        }
+    }
+    ppx = L->px;
+}
+
+static void marks_draw(int w, int h)
+{
     static const float kx = 33.6f, ky = 25.0f, squash = 0.72f;
     ULONGLONG now = GetTickCount64();
-    float cx, cy;
-    int have_cam, i;
+    float cx, cy, S = ov_S;
+    int have_cam, i, lx0 = ov_hi ? ov_ox : 0, ly0 = ov_hi ? ov_oy : 0;
+    int lx1 = lx0 + (int)floorf((float)w * S + 0.5f), ly1 = ly0 + (int)floorf((float)h * S + 0.5f);
+    if (lx1 > ov_bw) lx1 = ov_bw;
+    if (ly1 > ov_bh) ly1 = ov_bh;
     have_cam = camera_focus(&cx, &cy);
     for (i = 0; i < MARKER_SLOTS; i++) {
         float age, grow, fade, s, px, py, ro, ri;
@@ -760,29 +967,33 @@ void avp_overlay_draw(uint32_t *rgb, int w, int h)
             px -= (cx - s_marks[i].camx) * kx;
             py -= (cy - s_marks[i].camy) * ky;
         }
-        ro = 15.0f * s;
-        ri = 9.0f * s;
+        px = (float)lx0 + px * S;
+        py = (float)ly0 + py * S;
+        ro = 15.0f * s * S;
+        ri = 9.0f * s * S;
         inner = blend(s_marks[i].rgb, 0x00FFFFFFu, 0.55f);
-        x0 = (int)(px - ro - 2); x1 = (int)(px + ro + 2);
-        y0 = (int)(py - ro * squash - 2); y1 = (int)(py + ro * squash + 2);
-        if (x0 < 0) x0 = 0;
-        if (y0 < 0) y0 = 0;
-        if (x1 >= w) x1 = w - 1;
-        if (y1 >= h) y1 = h - 1;
+        x0 = (int)(px - ro - 2 * S); x1 = (int)(px + ro + 2 * S);
+        y0 = (int)(py - ro * squash - 2 * S); y1 = (int)(py + ro * squash + 2 * S);
+        if (x0 < lx0) x0 = lx0;
+        if (y0 < ly0) y0 = ly0;
+        if (x1 >= lx1) x1 = lx1 - 1;
+        if (y1 >= ly1) y1 = ly1 - 1;
         for (y = y0; y <= y1; y++) {
             for (x = x0; x <= x1; x++) {
                 float dx = (float)x + 0.5f - px, dy = ((float)y + 0.5f - py) / squash;
                 float d = sqrtf(dx * dx + dy * dy);
-                uint32_t *p = &rgb[(size_t)y * w + x];
+                uint32_t *p = &ov_buf[(size_t)y * ov_bw + x];
                 float a;
-                a = band(d, ro - 4.5f * s, ro);
-                if (a > 0.0f) *p = blend(*p, 0x00707478u, a * 0.7f * fade);
-                a = band(d, ro - 0.8f, ro + 0.4f);
-                if (a > 0.0f) *p = blend(*p, 0x00282A2Cu, a * 0.5f * fade);
-                a = band(d, ri - 2.2f * s, ri);
-                if (a > 0.0f) *p = blend(*p, inner, a * 0.95f * fade);
+                a = band(d, ro - 4.5f * s * S, ro);
+                if (a > 0.0f) *p = ov_mix(*p, 0x00707478u, a * 0.7f * fade);
+                a = band(d, ro - 0.8f * S, ro + 0.4f * S);
+                if (a > 0.0f) *p = ov_mix(*p, 0x00282A2Cu, a * 0.5f * fade);
+                a = band(d, ri - 2.2f * s * S, ri);
+                if (a > 0.0f) *p = ov_mix(*p, inner, a * 0.95f * fade);
             }
         }
+        if (ov_hi && x1 >= x0 && y1 >= y0)
+            ov_touch(x0, y0, x1 + 1, y1 + 1);
     }
 }
 
@@ -898,7 +1109,7 @@ static void move_marker(const uint32_t *pos, int fx, int fy)
     static const uint32_t hashes[3] = { 0x7715B5E5u, 0x55EE21EFu, 0x3C905527u };
     uint32_t p = G32(AVP_MARKER_OWNER), made = 0;
     const char *gm;
-    int use_game, sent;
+    int use_game;
     if (getenv("AVP_NO_MOVE_MARKER"))
         return;
     gm = getenv("AVP_GAME_MARKER");
@@ -913,18 +1124,6 @@ static void move_marker(const uint32_t *pos, int fx, int fy)
         return;
     if (s_race < 0 || s_race >= 3)
         return;
-    if (avp_coop_role() != 0) {
-        float v[3];
-        v[0] = u2f(pos[0]);
-        v[1] = u2f(pos[1]);
-        v[2] = u2f(pos[2]);
-        sent = avp_coop_marker(hashes[s_race], v);
-        if (s_trace)
-            fprintf(stderr, "[MOUSE] game marker at %g,%g,%g: %s\n", (double)v[0], (double)v[1],
-                    (double)v[2], sent > 0 ? "sent to both machines" : sent == 0 ? "not sent" : "local");
-        if (sent >= 0)
-            return;
-    }
     {
         uint32_t pv = scratch(16), a[2];
         G32(pv) = pos[0];
@@ -1449,12 +1648,12 @@ static void bar_digit(uint32_t *rgb, int w, int h, int x, int y, int d)
                 for (sx = 0; sx < 2; sx++) {
                     int px = x + c * 2 + sx, py = y + r * 2 + sy;
                     if (px >= 0 && py >= 0 && px < w && py < h)
-                        rgb[py * w + px] = 0x00FFFFFFu;
+                        ov_put(px, py, 0x00FFFFFFu, 1.0f);
                 }
         }
 }
 
-static const uint8_t k_font[38][7] = {
+static const uint8_t k_font[39][7] = {
     { 0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E }, { 0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E },
     { 0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F }, { 0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E },
     { 0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02 }, { 0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E },
@@ -1474,6 +1673,7 @@ static const uint8_t k_font[38][7] = {
     { 0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0A }, { 0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11 },
     { 0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04 }, { 0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F },
     { 0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00 }, { 0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00 },
+    { 0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C },
 };
 
 static void bar_text(uint32_t *rgb, int w, int h, int x, int y, const char *str, uint32_t col)
@@ -1485,23 +1685,63 @@ static void bar_text(uint32_t *rgb, int w, int h, int x, int y, const char *str,
         for (t = str; *t; t++, cx += 6) {
             int ch = *t, gi, r, c;
             gi = ch >= '0' && ch <= '9' ? ch - '0' : ch >= 'A' && ch <= 'Z' ? ch - 'A' + 10
-               : ch == '+' ? 36 : ch == '-' ? 37 : -1;
+               : ch == '+' ? 36 : ch == '-' ? 37 : ch == '.' ? 38 : -1;
             if (gi < 0)
                 continue;
             for (r = 0; r < 7; r++)
                 for (c = 0; c < 5; c++) {
                     int px = cx + c, py = cy + r;
                     if (((k_font[gi][r] >> (4 - c)) & 1) && px >= 0 && py >= 0 && px < w && py < h)
-                        rgb[py * w + px] = pass ? col : 0x00080808u;
+                        ov_put(px, py, pass ? col : 0x00080808u, 1.0f);
                 }
         }
     }
 }
 
+extern volatile LONG g_avp_coop_banner;
+
+static void banner_text(int x, int y, const char *str, uint32_t col, int sc)
+{
+    int pass;
+    for (pass = 0; pass < 2; pass++) {
+        const char *t;
+        int cx = x + (pass ? 0 : sc), cy = y + (pass ? 0 : sc);
+        for (t = str; *t; t++, cx += 6 * sc) {
+            int ch = *t, gi, r, c, i, j;
+            gi = ch >= '0' && ch <= '9' ? ch - '0' : ch >= 'A' && ch <= 'Z' ? ch - 'A' + 10
+               : ch == '+' ? 36 : ch == '-' ? 37 : ch == '.' ? 38 : -1;
+            if (gi < 0)
+                continue;
+            for (r = 0; r < 7; r++)
+                for (c = 0; c < 5; c++) {
+                    if (!((k_font[gi][r] >> (4 - c)) & 1))
+                        continue;
+                    for (i = 0; i < sc; i++)
+                        for (j = 0; j < sc; j++)
+                            ov_put(cx + c * sc + i, cy + r * sc + j, pass ? col : 0x00080808u, 1.0f);
+                }
+        }
+    }
+}
+
+static void coop_banner_draw(int w, int h)
+{
+    static const char wait[] = "WAITING FOR OTHER PLAYER TO LOAD...";
+    static const char stall[] = "HOST NOT RESPONDING";
+    static const char lost[] = "CONNECTION LOST";
+    LONG b = g_avp_coop_banner;
+    if (b == 1)
+        banner_text((w - (int)(sizeof wait - 1) * 12) / 2, h / 2 - 7, wait, 0x00FFFFFFu, 2);
+    else if (b == 2)
+        banner_text((w - (int)(sizeof stall - 1) * 12) / 2, 24, stall, 0x00FFC040u, 2);
+    else if (b == 3)
+        banner_text((w - (int)(sizeof lost - 1) * 12) / 2, 24, lost, 0x00FF3030u, 2);
+}
+
 static void bar_dot(uint32_t *rgb, int w, int h, int x, int y, uint32_t col)
 {
     if (x >= 0 && y >= 0 && x < w && y < h)
-        rgb[y * w + x] = col;
+        ov_put(x, y, col, 1.0f);
 }
 
 static void bar_mark(uint32_t *rgb, int w, int h, int x0, int y0, int race, uint32_t col)
@@ -1564,18 +1804,19 @@ static void group_bar_draw(uint32_t *rgb, int w, int h)
         bc = same ? bright : blend(rc, 0x00101010u, 0.35f);
         for (y = STRIP_Y; y < STRIP_Y + TAB_H && y < h; y++)
             for (x = tx; x < tx + TAB_W && x < w; x++) {
-                uint32_t *p = &rgb[y * w + x];
                 int dx = x - tx, dy = y - STRIP_Y, ex = TAB_W - 1 - dx, ey = TAB_H - 1 - dy;
                 int edge = dx < ring || ex < ring || dy < ring || ey < ring;
                 if ((dx + dy < 3) || (ex + dy < 3) || (dx + ey < 3) || (ex + ey < 3)) {
                     if (dx + dy == 2 || ex + dy == 2 || dx + ey == 2 || ex + ey == 2)
-                        *p = bc;
+                        ov_put(x, y, bc, 1.0f);
                     continue;
                 }
                 if (dx >= 2 && dx < 5 && dy >= 3 && dy < TAB_H - 3)
-                    *p = rc;
+                    ov_put(x, y, rc, 1.0f);
+                else if (edge)
+                    ov_put(x, y, bc, 1.0f);
                 else
-                    *p = edge ? bc : blend(*p, 0x00080C10u, 0.72f);
+                    ov_put(x, y, 0x00080C10u, 0.72f);
             }
         snprintf(line, sizeof line, "%d", g);
         bar_text(rgb, w, h, tx + 8, STRIP_Y + 4, line, same ? 0x00FFFFFFu : 0x00C8D0D8u);
@@ -3025,6 +3266,7 @@ static void avp_mouse_frame_body(uint32_t mgr)
 void avp_mouse_frame(uint32_t mgr)
 {
     avp_mouse_frame_body(mgr);
+    coop_marks_snap();
     avp_wide_narrow();
 }
 

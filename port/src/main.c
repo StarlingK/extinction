@@ -44,7 +44,6 @@ static BOOL load_xbe(const char *path, void **out_data, size_t *out_size);
 
 extern void xbe_entry_point(void);
 extern void avp_coop_crash_context(void);
-extern void avp_coop_install_heap_hook(void);
 extern int xbox_FramebufferKeyDown(int vk);
 
 extern void nv2a_pb_set_semaphore_target(uint32_t guest_va);
@@ -720,7 +719,6 @@ static char s_save_dir[AVP_MAX_PATH * 2];
 static int avp_prepare(void)
 {
     avp_log_file_init();
-    avp_coop_install_heap_hook();
 
     if (!getenv("RECOMP_MKB_MOUSE"))
         _putenv("RECOMP_MKB_MOUSE=0");

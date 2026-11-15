@@ -10,7 +10,7 @@ add_compile_definitions(
     NOMINMAX
 )
 
-set(XBOXRECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../xboxrecomp" CACHE PATH
+set(XBOXRECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../toolkit/xboxrecomp-0.17.0" CACHE PATH
     "Path to the xboxrecomp toolkit root directory")
 
 add_subdirectory(${XBOXRECOMP_DIR} ${CMAKE_BINARY_DIR}/xboxrecomp)
@@ -24,6 +24,7 @@ set(GAME_SOURCES
     src/avp_pcmenu.c
     src/avp_keys.c
     src/avp_coop.c
+    src/avp_coop_proto.c
     src/avp_layout.c
     src/avp_skirmish.c
     src/avp_editor.c

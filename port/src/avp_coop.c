@@ -1,3 +1,7 @@
+#ifndef _WIN32
+#define _GNU_SOURCE
+#endif
+#include <time.h>
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -41,320 +45,138 @@ static int ioctlsocket(SOCKET s, long cmd, u_long *arg)
 #include "avp_skirmish.h"
 #include "avp_coop.h"
 
+#include "avp_coop_proto.h"
+
 extern ptrdiff_t g_xbox_mem_offset;
+static void tx_stop(void);
+static void coop_fail(const char *why);
+static int send_msg(uint32_t type, const void *body, uint32_t len);
 
-#define G32(a) (*(volatile uint32_t *)((uintptr_t)(uint32_t)(a) + (uintptr_t)g_xbox_mem_offset))
-#define GF(a)  (*(volatile float *)((uintptr_t)(uint32_t)(a) + (uintptr_t)g_xbox_mem_offset))
-#define G8(a)  (*(volatile uint8_t *)((uintptr_t)(uint32_t)(a) + (uintptr_t)g_xbox_mem_offset))
+extern uint32_t avp_gcall(uint32_t va, uint32_t self, const uint32_t *args, int n, uint32_t eax);
+extern uint32_t avp_gcall_regs(uint32_t va, const uint32_t *regs, const uint32_t *args, int n);
+extern uint32_t avp_guest_alloca(uint32_t bytes);
+extern uint32_t avp_guest_esp(void);
+extern void avp_guest_set_esp(uint32_t v);
+extern void avp_run_order(int route, uint32_t handle, const uint8_t *msg, uint32_t len);
+extern const char *avp_player_name(void);
 
-#define AVP_CLOCK        0x002F689Cu
-#define AVP_CLOCK_SCALE  0x002F6888u
-#define AVP_RNG_ACC      0x002CC280u
-#define AVP_RNG_SEED     0x002CC284u
-#define AVP_OBJ_TABLE    0x00289E40u
-#define AVP_TIMER_LO     0x000DA400u
-#define AVP_TIMER_HI     0x000DA900u
-#define AVP_TIMER_TICK   0x000DA65Du
-#define AVP_WAIT_START   0x000DA7EDu
-#define AVP_WAIT_POLL    0x000DA82Au
-#define OBJ_BYTES        0x80u
+#define AVP_OBJ_TABLE    CP_OBJ_TABLE
+#define AVP_WORLD        CP_WORLD
+#define AVP_POINTER      CP_POINTER_G
+#define AVP_START_DEATH  0x0003C400u
+#define AVP_PTR_GLOBAL2  0x002F67F4u
+#define AVP_FACTORY      0x00027690u
+#define AVP_SELECT_FN    0x000F0070u
+#define AVP_DESELECT_FN  0x000F01A0u
+#define AVP_MOVE_FN      0x0002D9F0u
+#define AVP_NOWHERE      CP_NOWHERE
+#define AVP_GROUND_FN    0x000F0420u
+#define AVP_BUY_FN       0x000BF700u
+#define AVP_LEVEL_RESET  0x0006A8E0u
+#define AVP_LEVEL_RECORD 0x00306018u
+#define AVP_TECH_TREE    CP_TECH_TREE
+#define AVP_TECH_INIT    0x00092E30u
+#define AVP_TECH_VT      0x0022E184u
+#define SHELL_PTR        0x002F67F0u
+#define SHELL_FLAGS      0x210u
+#define UNIT_PLAYER      0x474u
+#define SEL_MAX          64
+#define CFG_MAX          2048u
+#define MISSIONS         21
 
 enum { ROLE_NONE, ROLE_HOST, ROLE_GUEST };
+enum { MSG_HELLO = 1, MSG_START = 2, MSG_CFG = 6, MSG_LAUNCH = 7, MSG_PICK = 8, MSG_READY = 9, MSG_STATE = 13, MSG_ORDER = 14, MSG_MIRROR = 15 };
+
+#define COOP_MAGIC   0x43505641u
+#define COOP_VERSION 8u
+#define ST_RING      6u
+#define ORD_RING     128u
+#define STALL_MS     3000u
 
 static int s_role;
 static void coop_start_net(void);
-static int s_env_fixed, s_rebase, s_mission_seen;
-static uint32_t s_rng_save[2];
-static int s_rng_saved;
-static int s_fixed = -1, s_hz = 60, s_log_every = 30, s_dump_tick = -1;
-static uint64_t s_vcount = 0x100000000ull, s_step, s_real_at_tick;
-static uint64_t s_tick, s_mission_tick;
-static int s_mission;
-
-static void coop_init(void)
-{
-    const char *e;
-    if (s_fixed >= 0) return;
-    e = getenv("AVP_FIXED_STEP");
-    s_fixed = e && *e && *e != '0';
-    if (s_fixed && atoi(e) > 1) s_hz = atoi(e);
-    s_env_fixed = s_fixed;
-    coop_start_net();
-    if (s_role != ROLE_NONE) s_fixed = 1;
-    e = getenv("AVP_SYNC_LOG");
-    if (e && atoi(e) > 0) s_log_every = atoi(e);
-    e = getenv("AVP_SYNC_DUMP");
-    if (e && *e) s_dump_tick = atoi(e);
-    if (s_fixed)
-        fprintf(stderr, "[SYNC] fixed step %d Hz\n", s_hz);
-}
-
-int avp_coop_fixed(void)
-{
-    coop_init();
-    return s_fixed;
-}
-
-uint64_t avp_coop_now_ms(void)
-{
-    coop_init();
-    if (!s_fixed) return GetTickCount64();
-    return s_tick * 1000u / (uint64_t)s_hz;
-}
-
-static uint64_t fnv(uint64_t h, const void *p, size_t n)
-{
-    const uint8_t *b = (const uint8_t *)p;
-    while (n--) { h ^= *b++; h *= 0x100000001B3ull; }
-    return h;
-}
-
-#define LOCAL_LO 0x03082000u
-#define LOCAL_HI 0x04000000u
-#define LIB_MAX  4096u
-
-typedef struct { uint32_t lo, hi; } Span;
-
-static const Span k_lib_globals[] = {
-    { 0x0026516Cu, 0x00265170u },
-    { 0x00269408u, 0x0026A39Cu },
-    { 0x00275D64u, 0x00275D68u },
-    { 0x00285348u, 0x00285358u },
-    { 0x00288354u, 0x002885E0u },
-    { 0x0028C3FCu, 0x0028C400u },
-    { 0x002E7264u, 0x002E7268u },
-    { 0x002FE000u, 0x002FFDACu },
-    { 0x002FFE08u, 0x00301014u },
-    { 0x0030BDA0u, 0x0030BDF0u },
-    { 0x0030BEDCu, 0x003102E4u },
-};
-
-static const struct { uint32_t lo, hi; uint8_t id; } k_lib_code[] = {
-    { 0x00170D60u, 0x001836C0u, 1 },
-    { 0x001836C0u, 0x0019F580u, 2 },
-    { 0x0019F580u, 0x001BC700u, 3 },
-    { 0x001BC700u, 0x001D5920u, 4 },
-    { 0x001D5920u, 0x001FD980u, 5 },
-    { 0x001FD980u, 0x002050C0u, 6 },
-};
-
-extern void xbox_HeapSetTagHook(uint8_t (*hook)(uint32_t caller));
-extern uint32_t xbox_HeapTagGeneration(void);
-extern uint32_t xbox_HeapEnumTagged(uint32_t *out, uint32_t max);
-
-static Span s_lib_own[LIB_MAX], s_lib_peer[LIB_MAX];
-static uint32_t s_lib_own_n, s_lib_peer_n, s_lib_gen = 0xFFFFFFFFu;
-static uint32_t s_lib_triples[LIB_MAX * 3u];
-
-static uint8_t lib_heap_tag(uint32_t caller)
-{
-    uint32_t i;
-    for (i = 0; i < sizeof k_lib_code / sizeof k_lib_code[0]; i++)
-        if (caller >= k_lib_code[i].lo && caller < k_lib_code[i].hi) return k_lib_code[i].id;
-    return 0;
-}
-
-void avp_coop_install_heap_hook(void)
-{
-    xbox_HeapSetTagHook(lib_heap_tag);
-}
-
-static int span_cmp(const void *a, const void *b)
-{
-    uint32_t x = ((const Span *)a)->lo, y = ((const Span *)b)->lo;
-    return x < y ? -1 : x > y;
-}
-
-static uint32_t span_merge(Span *s, uint32_t n)
-{
-    uint32_t i, o = 0;
-    if (!n) return 0;
-    qsort(s, n, sizeof *s, span_cmp);
-    for (i = 1; i < n; i++) {
-        if (s[i].lo <= s[o].hi) {
-            if (s[i].hi > s[o].hi) s[o].hi = s[i].hi;
-        } else {
-            s[++o] = s[i];
-        }
-    }
-    return o + 1;
-}
-
-static int span_has(const Span *s, uint32_t n, uint32_t a)
-{
-    uint32_t lo = 0, hi = n;
-    while (lo < hi) {
-        uint32_t mid = lo + (hi - lo) / 2;
-        if (a < s[mid].lo) hi = mid;
-        else if (a >= s[mid].hi) lo = mid + 1;
-        else return 1;
-    }
-    return 0;
-}
-
-static int lib_static(uint32_t a)
-{
-    uint32_t i;
-    for (i = 0; i < sizeof k_lib_globals / sizeof k_lib_globals[0]; i++)
-        if (a >= k_lib_globals[i].lo && a < k_lib_globals[i].hi) return 1;
-    return 0;
-}
-
-static void lib_refresh(void)
-{
-    uint32_t gen = xbox_HeapTagGeneration(), n, i;
-    if (gen == s_lib_gen) return;
-    n = xbox_HeapEnumTagged(s_lib_triples, LIB_MAX);
-    if (n >= LIB_MAX) fprintf(stderr, "[COOP] more than %u library heap blocks, the rest are not protected\n", LIB_MAX);
-    for (i = 0; i < n; i++) {
-        s_lib_own[i].lo = s_lib_triples[i * 3u];
-        s_lib_own[i].hi = s_lib_triples[i * 3u] + s_lib_triples[i * 3u + 1u];
-    }
-    s_lib_own_n = span_merge(s_lib_own, n);
-    s_lib_gen = gen;
-}
-
-static int lib_own_addr(uint32_t a)
-{
-    return lib_static(a) || span_has(s_lib_own, s_lib_own_n, a);
-}
-
-static int proc_local(uint32_t w)
-{
-    if (w < 0x10000u) return 0;
-    if (w >= LOCAL_LO && w < LOCAL_HI) return 1;
-    if (w >= 0x80000000u && w < 0x84000000u) return 1;
-    if (w >= 0xF0000000u && w < 0xF4000000u) return 1;
-    return lib_own_addr(w);
-}
-
-static uint64_t obj_hash(uint32_t obj)
-{
-    uint32_t w[OBJ_BYTES / 4u], i;
-    for (i = 0; i < OBJ_BYTES / 4u; i++) {
-        w[i] = G32(obj + i * 4u);
-        if (proc_local(w[i])) w[i] = 0;
-    }
-    return fnv(0xCBF29CE484222325ull, w, sizeof w);
-}
-
-static int obj_ok(uint32_t obj)
-{
-    return obj >= 0x10000u && obj < 0x84000000u - OBJ_BYTES;
-}
-
-static void sync_report(int dump)
-{
-    uint64_t h = 0xCBF29CE484222325ull, world = h;
-    uint32_t clock = G32(AVP_CLOCK), acc = G32(AVP_RNG_ACC), seed = G32(AVP_RNG_SEED), i;
-    int n = 0;
-    lib_refresh();
-    for (i = 1; i < 0x10000u; i++) {
-        uint32_t obj = G32(AVP_OBJ_TABLE + i * 4u);
-        uint64_t oh;
-        if (!obj_ok(obj)) continue;
-        oh = obj_hash(obj);
-        world = fnv(world, &i, sizeof i);
-        world = fnv(world, &oh, sizeof oh);
-        n++;
-        if (dump)
-        {
-            uint32_t k;
-            fprintf(stderr, "[SYNCOBJ] %04X vt %08X %016llX at %08X\n", i, G32(obj), (unsigned long long)oh, obj);
-            fprintf(stderr, "[SYNCRAW] %04X", i);
-            for (k = 0; k < OBJ_BYTES; k += 4) fprintf(stderr, " %08X", G32(obj + k));
-            fprintf(stderr, "\n");
-        }
-    }
-    h = fnv(h, &clock, sizeof clock);
-    h = fnv(h, &acc, sizeof acc);
-    h = fnv(h, &seed, sizeof seed);
-    fprintf(stderr, "[SYNC] tick %llu clock %.4f rng %08X %08X objs %d core %016llX world %016llX\n",
-            (unsigned long long)(s_tick - s_mission_tick), (double)GF(AVP_CLOCK), acc, seed, n,
-            (unsigned long long)h, (unsigned long long)world);
-}
-
-static uint64_t world_hash(void)
-{
-    uint64_t world = 0xCBF29CE484222325ull;
-    uint32_t i;
-    lib_refresh();
-    for (i = 1; i < 0x10000u; i++) {
-        uint32_t obj = G32(AVP_OBJ_TABLE + i * 4u);
-        uint64_t oh;
-        if (!obj_ok(obj)) continue;
-        oh = obj_hash(obj);
-        world = fnv(world, &i, sizeof i);
-        world = fnv(world, &oh, sizeof oh);
-    }
-    return world;
-}
-
-static uint64_t core_hash(void)
-{
-    uint64_t h = 0xCBF29CE484222325ull;
-    uint32_t v[3] = { G32(AVP_CLOCK), G32(AVP_RNG_ACC), G32(AVP_RNG_SEED) };
-    return fnv(h, v, sizeof v);
-}
-
-enum { MSG_HELLO = 1, MSG_START = 2, MSG_TURN = 3, MSG_PAGEHASH = 4, MSG_PAGES = 5, MSG_CFG = 6, MSG_LAUNCH = 7, MSG_PICK = 8, MSG_READY = 9 };
-
-#define PAGE          0x1000u
-#define BULK_MAX      (64u << 20)
-
-static const uint32_t k_sync_ranges[][2] = {
-    { 0x00265000u, 0x00311000u },
-    { 0x00F81000u, 0x03082000u },
-};
-
-static uint8_t *volatile s_bulk[8];
-static volatile uint32_t s_bulk_len[8];
-
-#define TURN_TICKS   4
-#define TURN_DELAY   2
-#define TURN_RING    64
-#define CMD_BYTES    8192
-#define WAIT_MS_DEFAULT 120000
-
-static uint64_t wait_ms(void)
-{
-    static uint64_t v;
-    if (!v) {
-        const char *e = getenv("AVP_COOP_WAIT_MS");
-        v = e && atoi(e) > 0 ? (uint64_t)atoi(e) : WAIT_MS_DEFAULT;
-    }
-    return v;
-}
-#define COOP_MAGIC   0x43505641u
-#define COOP_VERSION 6u
-
-typedef struct {
-    uint32_t turn;
-    int have;
-    uint64_t hash;
-    uint64_t whash;
-    uint32_t len;
-    uint8_t data[CMD_BYTES];
-} Turn;
-
-typedef void (*avp_coop_exec_fn)(int from_host, const uint8_t *data, uint32_t len);
-
+static int s_mission_seen, s_mission, s_inited;
 static int s_peer_started, s_coop_dead;
 static SOCKET s_sock = INVALID_SOCKET;
 static CRITICAL_SECTION s_lock;
-static Turn s_remote[TURN_RING];
-static Turn s_local[TURN_RING];
-static uint64_t s_hashes[TURN_RING];
-static uint64_t s_whashes[TURN_RING];
-static uint8_t s_pending[CMD_BYTES];
-static uint32_t s_npending;
-static avp_coop_exec_fn s_exec;
+static CRITICAL_SECTION s_send_lock;
+static int s_send_lock_ready;
+volatile LONG g_avp_coop_banner;
 static HANDLE s_net_ready, s_cfg_ready, s_thread;
 static SOCKET s_listen = INVALID_SOCKET;
 static volatile int s_cancel, s_state;
 static int s_lock_ready, s_tries = 120, s_wsa_ok;
 static volatile int s_cfg_n;
 static char s_spec[160], s_text[160], s_peer_name[24], s_peer_addr[48];
+static volatile int s_last_net_err;
+static volatile LONG s_netlog_n;
+static struct { ULONGLONG ms; int dir; uint32_t type, len; } s_netlog[32];
+static int s_local_input, s_executing, s_allow_death;
+static uint32_t s_kill_q[64];
+static int s_kill_n;
+static char s_my_map[8];
+
+static uint8_t *s_st_buf[ST_RING];
+static uint32_t s_st_len[ST_RING], s_st_head, s_st_tail, s_st_dropseq;
+static volatile LONG s_st_skip;
+static volatile ULONGLONG s_st_last_ms;
+static uint8_t *s_st_scratch;
+static CpOrder s_ord[ORD_RING];
+static uint32_t s_ord_head, s_ord_tail;
+static uint8_t s_ord_raw[ORD_RING][CP_ORDER_WIRE_MAX];
+static uint32_t s_ord_rawlen[ORD_RING];
+static volatile LONG s_ord_in, s_ord_drop;
+
+static uint64_t now_us(void)
+{
+#ifdef _WIN32
+    static LARGE_INTEGER freq;
+    LARGE_INTEGER t;
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&t);
+    return (uint64_t)(t.QuadPart * 1000000ll / freq.QuadPart);
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000u;
+#endif
+}
+
+static void coop_init(void)
+{
+    if (s_inited) return;
+    s_inited = 1;
+    coop_start_net();
+}
+
+uint64_t avp_coop_now_ms(void)
+{
+    coop_init();
+    return GetTickCount64();
+}
+
+static int kill_queue(uint32_t h)
+{
+    int i;
+    for (i = 0; i < s_kill_n; i++)
+        if (s_kill_q[i] == h) return 1;
+    if (s_kill_n >= 64) return 0;
+    s_kill_q[s_kill_n++] = h;
+    return 1;
+}
+
+static void kill_pump(void)
+{
+    int i;
+    s_allow_death = 1;
+    for (i = 0; i < s_kill_n; i++) {
+        uint32_t h = s_kill_q[i], obj = cp_obj_of(h);
+        if (!obj || G8(obj + 0x26Du)) continue;
+        avp_gcall(AVP_START_DEATH, 0, (uint32_t[]){ h, 1 }, 2, h);
+    }
+    s_allow_death = 0;
+    s_kill_n = 0;
+}
 
 typedef struct {
     uint32_t magic, version, role;
@@ -389,38 +211,10 @@ static int mission_find(const char *code)
         if (!strncmp(k_missions[i].code, code, 3)) return i;
     return -1;
 }
-
-void avp_coop_set_exec(avp_coop_exec_fn fn)
-{
-    s_exec = fn;
-}
-
 int avp_coop_role(void)
 {
     return s_role;
 }
-
-int avp_coop_queue(const void *data, uint32_t len)
-{
-    int ok = 0;
-    if (s_role == ROLE_NONE || s_coop_dead) return 0;
-    EnterCriticalSection(&s_lock);
-    if (s_npending + 4 + len <= CMD_BYTES) {
-        memcpy(s_pending + s_npending, &len, 4);
-        memcpy(s_pending + s_npending + 4, data, len);
-        s_npending += 4 + len;
-        ok = 1;
-    }
-    LeaveCriticalSection(&s_lock);
-    return ok;
-}
-
-static CRITICAL_SECTION s_send_lock;
-static int s_send_lock_ready;
-static volatile int s_last_net_err;
-static volatile LONG s_netlog_n;
-static struct { ULONGLONG ms; int dir; uint32_t type, len; } s_netlog[32];
-
 static void net_note(int dir, uint32_t type, uint32_t len)
 {
     LONG i = InterlockedIncrement(&s_netlog_n) - 1;
@@ -434,9 +228,8 @@ static void net_dump(const char *why)
 {
     LONG n = s_netlog_n, i, first = n > 32 ? n - 32 : 0;
     ULONGLONG now = GetTickCount64();
-    fprintf(stderr, "[COOP] net state (%s): role %d state %d mission %d dead %d tick %llu since mission %llu last socket error %d\n",
-            why, s_role, s_state, s_mission, s_coop_dead, (unsigned long long)s_tick,
-            (unsigned long long)(s_mission ? s_tick - s_mission_tick : 0), s_last_net_err);
+    fprintf(stderr, "[COOP] net state (%s): role %d state %d mission %d dead %d last socket error %d\n",
+            why, s_role, s_state, s_mission, s_coop_dead, s_last_net_err);
     for (i = first; i < n; i++)
         fprintf(stderr, "[COOP]   %s type %u len %u, %llu ms ago\n", s_netlog[i & 31].dir ? "recv" : "send",
                 s_netlog[i & 31].type, s_netlog[i & 31].len, (unsigned long long)(now - s_netlog[i & 31].ms));
@@ -503,7 +296,6 @@ static void set_state(int st, const char *fmt, ...)
     s_state = st;
     LeaveCriticalSection(&s_lock);
 }
-
 static void lock_init(void)
 {
     if (s_lock_ready) return;
@@ -546,6 +338,7 @@ static void coop_fail_text(const char *log, const char *fmt, ...)
     va_end(ap);
     if (s_coop_dead) return;
     s_coop_dead = 1;
+    if (s_mission && !s_cancel) InterlockedExchange(&g_avp_coop_banner, 3);
     if (s_cfg_ready) SetEvent(s_cfg_ready);
     if (!s_cancel) set_state(3, "%s", t);
     if (s_cancel) return;
@@ -557,12 +350,20 @@ static void coop_fail(const char *why)
 {
     if (s_coop_dead) return;
     s_coop_dead = 1;
+    if (s_mission && !s_cancel) InterlockedExchange(&g_avp_coop_banner, 3);
     if (s_cfg_ready) SetEvent(s_cfg_ready);
     if (!s_cancel)
         set_state(3, "%s: %s", s_state == 2 ? "Connection lost" : s_role == ROLE_HOST ? "Could not host" : "Could not connect", why);
     if (s_cancel) return;
     fprintf(stderr, "[COOP] connection lost: %s; carrying on alone\n", why);
     net_dump(why);
+}
+
+static void proto_fail(const char *what, uint32_t type, uint32_t len)
+{
+    fprintf(stderr, "[COOP] malformed %s from the peer (message type %u, length %u); dropping the connection\n", what, type, len);
+    if (s_sock != INVALID_SOCKET) shutdown(s_sock, SD_BOTH);
+    coop_fail("the other game sent malformed data");
 }
 
 static void close_listen(void)
@@ -711,6 +512,14 @@ static DWORD WINAPI net_thread(LPVOID arg)
         return 0;
     }
     setsockopt(s_sock, IPPROTO_TCP, TCP_NODELAY, (const char *)&one, sizeof one);
+    {
+#ifdef _WIN32
+        DWORD to = 4000;
+#else
+        struct timeval to = { 4, 0 };
+#endif
+        setsockopt(s_sock, SOL_SOCKET, SO_SNDTIMEO, (const char *)&to, sizeof to);
+    }
     memset(&hello, 0, sizeof hello);
     hello.magic = COOP_MAGIC;
     hello.version = COOP_VERSION;
@@ -724,14 +533,6 @@ static DWORD WINAPI net_thread(LPVOID arg)
         uint32_t hdr[2];
         if (!recv_all(hdr, sizeof hdr)) { coop_fail("closed"); return 0; }
         net_note(1, hdr[0], hdr[1]);
-        if (hdr[0] == MSG_PAGEHASH || hdr[0] == MSG_PAGES) {
-            uint8_t *b;
-            if (hdr[1] > BULK_MAX || !(b = (uint8_t *)malloc(hdr[1] ? hdr[1] : 1))) { coop_fail("bulk size"); return 0; }
-            if (hdr[1] && !recv_all(b, (int)hdr[1])) { free(b); coop_fail("bulk data"); return 0; }
-            s_bulk_len[hdr[0]] = hdr[1];
-            s_bulk[hdr[0]] = b;
-            continue;
-        }
         if (hdr[0] == MSG_CFG) {
             char cfg[CFG_MAX];
             if (hdr[1] > sizeof cfg || (hdr[1] && !recv_all(cfg, (int)hdr[1]))) { coop_fail("cfg"); return 0; }
@@ -754,7 +555,7 @@ static DWORD WINAPI net_thread(LPVOID arg)
             SetEvent(s_cfg_ready);
             continue;
         }
-        if (hdr[1] > sizeof(Turn) + 64) { coop_fail("bad packet"); return 0; }
+        if (hdr[0] != MSG_STATE && hdr[1] > 4096u) { proto_fail("oversized message", hdr[0], hdr[1]); return 0; }
         if (hdr[0] == MSG_HELLO) {
             if (hdr[1] != sizeof peer || !recv_all(&peer, sizeof peer)) { coop_fail("hello"); return 0; }
             if (peer.magic != COOP_MAGIC || peer.version != COOP_VERSION || peer.role == (uint32_t)s_role) {
@@ -806,28 +607,64 @@ static DWORD WINAPI net_thread(LPVOID arg)
             memcpy(s_peer_map, m, sizeof s_peer_map);
             s_peer_started = 1;
             fprintf(stderr, "[COOP] the other player's mission has started\n");
-        } else if (hdr[0] == MSG_TURN) {
-            uint32_t head[6], len;
-            uint8_t body[CMD_BYTES];
-            Turn *t;
-            if (hdr[1] < sizeof head || !recv_all(head, sizeof head)) { coop_fail("turn"); return 0; }
-            len = head[3];
-            if (len > CMD_BYTES || hdr[1] != sizeof head + len) { coop_fail("turn size"); return 0; }
-            if (len && !recv_all(body, (int)len)) { coop_fail("turn data"); return 0; }
+        } else if (hdr[0] == MSG_STATE) {
+            uint32_t slot, full;
+            uint8_t *dst;
+            if (s_role != ROLE_GUEST || hdr[1] < CP_HDR || hdr[1] > CP_STATE_MAX) { proto_fail("state size", hdr[0], hdr[1]); return 0; }
+            if (!s_st_scratch) s_st_scratch = (uint8_t *)malloc(CP_STATE_MAX);
             EnterCriticalSection(&s_lock);
-            t = &s_remote[head[0] % TURN_RING];
-            t->have = 0;
-            t->turn = head[0];
-            t->hash = (uint64_t)head[1] | ((uint64_t)head[2] << 32);
-            t->whash = (uint64_t)head[4] | ((uint64_t)head[5] << 32);
-            t->len = len;
-            memcpy(t->data, body, len);
-            t->have = 1;
+            full = s_st_tail - s_st_head >= ST_RING;
+            slot = s_st_tail % ST_RING;
             LeaveCriticalSection(&s_lock);
-            {
-                static int told;
-                if (told++ < 4) fprintf(stderr, "[COOP] got turn %u (%u bytes)\n", head[0], len);
+            if (!s_st_buf[slot]) s_st_buf[slot] = (uint8_t *)malloc(CP_STATE_MAX);
+            dst = full ? s_st_scratch : s_st_buf[slot];
+            if (!dst) { coop_fail("memory"); return 0; }
+            if (!recv_all(dst, (int)hdr[1])) { coop_fail("state data"); return 0; }
+            if (!cp_state_validate(dst, hdr[1])) { proto_fail("state contents", hdr[0], hdr[1]); return 0; }
+            s_st_last_ms = GetTickCount64();
+            EnterCriticalSection(&s_lock);
+            if (full) {
+                memcpy(&s_st_dropseq, dst + 4, 4);
+                s_st_skip = 1;
+            } else {
+                s_st_len[slot] = hdr[1];
+                s_st_tail++;
             }
+            LeaveCriticalSection(&s_lock);
+        } else if (hdr[0] == MSG_ORDER) {
+            uint8_t body[CP_ORDER_WIRE_MAX];
+            CpOrder ord;
+            if (s_role != ROLE_HOST || hdr[1] < 4 || hdr[1] > CP_ORDER_WIRE_MAX) { proto_fail("order size", hdr[0], hdr[1]); return 0; }
+            if (!recv_all(body, (int)hdr[1])) { coop_fail("order data"); return 0; }
+            if (!cp_order_parse(body, hdr[1], &ord) || ord.cmd == CP_CMD_REINF) { proto_fail("order contents", hdr[0], hdr[1]); return 0; }
+            EnterCriticalSection(&s_lock);
+            if (s_ord_tail - s_ord_head < ORD_RING) {
+                ord.player = 1;
+                s_ord[s_ord_tail % ORD_RING] = ord;
+                memcpy(s_ord_raw[s_ord_tail % ORD_RING], body, hdr[1]);
+                s_ord_rawlen[s_ord_tail % ORD_RING] = hdr[1];
+                s_ord_tail++;
+                InterlockedIncrement(&s_ord_in);
+            } else {
+                InterlockedIncrement(&s_ord_drop);
+            }
+            LeaveCriticalSection(&s_lock);
+        } else if (hdr[0] == MSG_MIRROR) {
+            uint8_t body[CP_ORDER_WIRE_MAX + 4];
+            CpOrder ord;
+            uint32_t pl;
+            if (s_role != ROLE_GUEST || hdr[1] < 8 || hdr[1] > CP_ORDER_WIRE_MAX + 4) { proto_fail("mirror size", hdr[0], hdr[1]); return 0; }
+            if (!recv_all(body, (int)hdr[1])) { coop_fail("mirror data"); return 0; }
+            memcpy(&pl, body, 4);
+            if (pl > 1u || !cp_order_parse(body + 4, hdr[1] - 4, &ord) || ord.cmd == CP_CMD_GIVE) { proto_fail("mirror contents", hdr[0], hdr[1]); return 0; }
+            ord.player = pl;
+            EnterCriticalSection(&s_lock);
+            if (s_ord_tail - s_ord_head < ORD_RING) {
+                s_ord[s_ord_tail % ORD_RING] = ord;
+                s_ord_rawlen[s_ord_tail % ORD_RING] = 0;
+                s_ord_tail++;
+            }
+            LeaveCriticalSection(&s_lock);
         } else {
             coop_fail("unknown message");
             return 0;
@@ -837,16 +674,13 @@ static DWORD WINAPI net_thread(LPVOID arg)
 
 static void net_begin(const char *spec, int role, int tries, const char *status)
 {
-    int i;
     lock_init();
     snprintf(s_spec, sizeof s_spec, "%s", spec);
-    for (i = 0; i < 8; i++) {
-        free(s_bulk[i]);
-        s_bulk[i] = NULL;
-    }
-    memset(s_remote, 0, sizeof s_remote);
-    memset(s_local, 0, sizeof s_local);
-    s_npending = 0;
+    EnterCriticalSection(&s_lock);
+    s_st_head = s_st_tail = 0;
+    s_ord_head = s_ord_tail = 0;
+    s_st_skip = 0;
+    LeaveCriticalSection(&s_lock);
     s_coop_dead = 0;
     s_peer_started = 0;
     s_cancel = 0;
@@ -884,6 +718,8 @@ static void coop_start_net(void)
 
 static void net_stop(void)
 {
+    if (s_sock != INVALID_SOCKET) fprintf(stderr, "[COOP] closing the connection on purpose (role %d, mission %d)\n", s_role, s_mission);
+    tx_stop();
     s_cancel = 1;
     if (s_thread) {
         close_listen();
@@ -906,11 +742,6 @@ static void net_stop(void)
     InterlockedExchange(&s_self_ready, 0);
     s_peer_map[0] = 0;
     if (s_lock_ready) set_state(0, "");
-    if (s_fixed != s_env_fixed) {
-        s_fixed = s_env_fixed;
-        s_rebase = 0;
-        fprintf(stderr, "[SYNC] fixed step %s\n", s_fixed ? "on" : "off");
-    }
 }
 
 static int net_allowed(void)
@@ -924,14 +755,6 @@ static int net_allowed(void)
     return 1;
 }
 
-static void fixed_late(void)
-{
-    if (s_fixed) return;
-    s_fixed = 1;
-    s_rebase = 1;
-    fprintf(stderr, "[SYNC] fixed step %d Hz (network match)\n", s_hz);
-}
-
 int avp_coop_host(int port)
 {
     char spec[32], status[64];
@@ -941,7 +764,6 @@ int avp_coop_host(int port)
     snprintf(spec, sizeof spec, "host:%d", port);
     if (!wsa_ensure()) return 0;
     snprintf(status, sizeof status, "Waiting for a player on port %d", port);
-    fixed_late();
     net_begin(spec, ROLE_HOST, 1, status);
     return 1;
 }
@@ -956,7 +778,6 @@ int avp_coop_join(const char *ip, int port)
     snprintf(spec, sizeof spec, "join:%.100s:%d", ip, port);
     if (!wsa_ensure()) return 0;
     snprintf(status, sizeof status, "Connecting to %.100s:%d", ip, port);
-    fixed_late();
     net_begin(spec, ROLE_GUEST, 5, status);
     return 1;
 }
@@ -1003,81 +824,14 @@ int avp_coop_send_cfg(void)
     return 0;
 }
 
-static void send_turn(uint32_t turn, uint64_t hash, uint64_t whash)
-{
-    uint32_t head[6];
-    Turn *t = &s_local[turn % TURN_RING];
-    EnterCriticalSection(&s_lock);
-    t->turn = turn;
-    t->len = s_npending;
-    memcpy(t->data, s_pending, s_npending);
-    s_npending = 0;
-    t->have = 1;
-    LeaveCriticalSection(&s_lock);
-    head[0] = turn;
-    head[1] = (uint32_t)hash;
-    head[2] = (uint32_t)(hash >> 32);
-    head[3] = t->len;
-    head[4] = (uint32_t)whash;
-    head[5] = (uint32_t)(whash >> 32);
-    {
-        uint8_t buf[sizeof head + CMD_BYTES];
-        memcpy(buf, head, sizeof head);
-        memcpy(buf + sizeof head, t->data, t->len);
-        if (!send_msg(MSG_TURN, buf, (uint32_t)(sizeof head + t->len)))
-            coop_fail("send");
-        {
-            static int told;
-            if (told++ < 4) fprintf(stderr, "[COOP] sent turn %u\n", turn);
-        }
-    }
-}
-
-#define RUN_BYTES (CMD_BYTES * 4)
-
-static uint8_t s_run[RUN_BYTES];
-static uint32_t s_nrun;
-static int s_local_input, s_executing;
-
-static void run_add(int from_host, const Turn *t)
-{
-    uint32_t o = 0;
-    while (o + 4 <= t->len) {
-        uint32_t n;
-        memcpy(&n, t->data + o, 4);
-        if (o + 4 + n > t->len || s_nrun + 8 + n > RUN_BYTES) break;
-        memcpy(s_run + s_nrun, &from_host, 4);
-        memcpy(s_run + s_nrun + 4, &n, 4);
-        memcpy(s_run + s_nrun + 8, t->data + o + 4, n);
-        s_nrun += 8 + n;
-        o += 4 + n;
-    }
-}
-
-static void run_cmds(int from_host, const Turn *t)
-{
-    run_add(from_host, t);
-}
-
-enum { CMD_ORDER = 1, CMD_GIVE = 2 };
-
-#define AVP_MSG_TYPES 0x002891F8u
-#define AVP_POINTER   0x002F6AECu
-#define ORDER_MAX     900u
-
 static uint8_t s_owner[0x10000];
 static uint32_t s_owner_h[0x10000];
-
-extern void avp_run_order(int route, uint32_t handle, const uint8_t *msg, uint32_t len);
+static int s_vs, s_vs_slot[2];
 
 static int local_player(void)
 {
     return s_role == ROLE_GUEST ? 1 : 0;
 }
-
-#define UNIT_PLAYER 0x474u
-
-static int s_vs, s_vs_slot[2];
 
 static void versus_init(void)
 {
@@ -1098,15 +852,28 @@ static void versus_init(void)
 
 static int owner_of(uint32_t handle)
 {
-    uint32_t i = handle >> 16;
+    uint32_t i = handle >> 16, obj;
+    if (!i) return -1;
     if (s_vs) {
-        uint32_t obj = G32(AVP_OBJ_TABLE + i * 4u);
         int slot;
-        if (!obj_ok(obj)) return -1;
+        obj = cp_obj_of(handle);
+        if (!obj) return -1;
         slot = (int)G32(obj + UNIT_PLAYER);
         return slot == s_vs_slot[0] ? 0 : slot == s_vs_slot[1] ? 1 : -1;
     }
     return s_owner_h[i] == handle ? s_owner[i] : 0;
+}
+
+static void owner_set(uint32_t handle, int owner)
+{
+    uint32_t i = handle >> 16;
+    if (s_vs || !i) return;
+    if (owner) {
+        s_owner_h[i] = handle;
+        s_owner[i] = 1;
+    } else if (s_owner_h[i] == handle) {
+        s_owner[i] = 0;
+    }
 }
 
 static int coop_live(void)
@@ -1114,27 +881,66 @@ static int coop_live(void)
     return s_role != ROLE_NONE && !s_coop_dead && s_mission;
 }
 
-enum { CMD_SELECT = 3, CMD_MOVE = 4, CMD_PCALL = 5, CMD_MARKER = 6 };
+static int guest_live(void)
+{
+    return s_role == ROLE_GUEST && !s_coop_dead && s_mission;
+}
 
-#define AVP_PTR_GLOBAL2  0x002F67F4u
-#define AVP_WORLD        0x002F6AE4u
-#define AVP_FACTORY      0x00027690u
-#define AVP_SELECT_FN    0x000F0070u
-#define AVP_DESELECT_FN  0x000F01A0u
-#define AVP_MOVE_FN      0x0002D9F0u
-#define AVP_NOWHERE      0x00304EDCu
-#define PTR_BYTES        0x280u
-#define SEL_MAX          64
+static int hk_owner(uint32_t h)
+{
+    return owner_of(h);
+}
 
-extern uint32_t avp_gcall(uint32_t va, uint32_t self, const uint32_t *args, int n, uint32_t eax);
-extern uint32_t avp_gcall_regs(uint32_t va, const uint32_t *regs, const uint32_t *args, int n);
-extern uint32_t avp_guest_alloca(uint32_t bytes);
-extern uint32_t avp_guest_esp(void);
-extern void avp_guest_set_esp(uint32_t v);
+static void hk_owner_set(uint32_t h, int o)
+{
+    owner_set(h, o);
+}
 
-#define AVP_LEVEL_RESET  0x0006A8E0u
-#define AVP_LEVEL_RECORD 0x00306018u
-#define SHELL_FLAGS      0x210u
+static void hk_kill(uint32_t h)
+{
+    kill_queue(h);
+}
+
+static void hk_unmatched(uint32_t vt)
+{
+    if (!(cp_class(vt) & CF_UNIT)) return;
+    static uint32_t seen[32];
+    static int n;
+    int i;
+    for (i = 0; i < n; i++)
+        if (seen[i] == vt) return;
+    if (n < 32) seen[n++] = vt;
+    {
+        char nm[48] = "";
+        uint32_t col = G32(vt - 4u), td = col >= 0x10000u && col < CP_LOCAL_HI - 0x100u ? G32(col + 12u) : 0, k = 0;
+        if (td >= 0x10000u && td < CP_LOCAL_HI - 0x100u)
+            while (k + 1 < sizeof nm && G8(td + 8u + k)) { nm[k] = (char)G8(td + 8u + k); k++; }
+        nm[k] = 0;
+        fprintf(stderr, "[COOP] no object here for host class %08X %s; no safe generic spawn path, not created\n", vt, nm);
+    }
+}
+
+static void call_vec(uint32_t obj, uint32_t slot, const float *v)
+{
+    uint32_t esp = avp_guest_esp(), va = avp_guest_alloca(16), i, vt = G32(obj);
+    uint32_t fn = vt >= 0x10000u && vt < CP_LOCAL_HI - 0x400u ? G32(vt + slot * 4u) : 0;
+    if (fn < 0x00011000u || fn >= 0x00170D60u) { avp_guest_set_esp(esp); return; }
+    for (i = 0; i < 3; i++) GF(va + 4 * i) = v[i];
+    avp_gcall(fn, obj, (uint32_t[]){ va }, 1, 0);
+    avp_guest_set_esp(esp);
+}
+
+static void hk_setpos(uint32_t obj, const float *v)
+{
+    call_vec(obj, 22, v);
+}
+
+static void hk_setrot(uint32_t obj, const float *v)
+{
+    call_vec(obj, 23, v);
+}
+
+static const CpHooks s_hooks = { hk_owner, hk_owner_set, hk_kill, hk_unmatched, hk_setpos, hk_setrot };
 
 static uint32_t shell_state(void)
 {
@@ -1199,14 +1005,318 @@ static void launch_pump(void)
     launch_apply((int)m);
 }
 
+static volatile LONG s_ord_sent, s_ord_exec, s_ord_rej;
+
+static uint32_t rd32le(const uint8_t *p)
+{
+    uint32_t v;
+    memcpy(&v, p, 4);
+    return v;
+}
+
+static int hostauth_block(void)
+{
+    return guest_live() && !s_allow_death;
+}
+
+int avp_coop_block_death(uint32_t unit)
+{
+    (void)unit;
+    return hostauth_block();
+}
+
+int avp_coop_block_death_h(uint32_t handle)
+{
+    (void)handle;
+    return hostauth_block();
+}
+
+int avp_coop_skip_ai(uint32_t ai)
+{
+    static int on = -1;
+    uint32_t npc;
+    if (on < 0) {
+        const char *e = getenv("AVP_COOP_SKIP_AI");
+        on = e && *e && *e != '0';
+    }
+    if (!on || !guest_live() || !cp_obj_ok(ai)) return 0;
+    npc = G32(ai + 0x188);
+    if (!cp_obj_ok(npc)) return 0;
+    return owner_of(G32(npc + 0x18)) != 1;
+}
+
+static int sane_guest_ptr(uint32_t v)
+{
+    return v >= 0x10000u && v < CP_LOCAL_HI - 0x100u;
+}
+
+static int friend_player(void)
+{
+    uint32_t world = G32(AVP_WORLD), pm;
+    if (!sane_guest_ptr(world)) return -1;
+    pm = G32(world + 0x78);
+    if (!sane_guest_ptr(pm)) return -1;
+    return (int)(G32(pm + 0x18) & 0xFFFFu);
+}
+
+int avp_coop_marked(uint32_t handle)
+{
+    uint32_t obj;
+    int o, fs;
+    if (!coop_live()) return 0;
+    obj = cp_obj_of(handle);
+    if (!obj || !(cp_class(G32(obj)) & CF_UNIT)) return 0;
+    o = owner_of(handle);
+    if (s_vs) {
+        if (o < 0) return 0;
+    } else {
+        fs = friend_player();
+        if (fs < 0 || (int)(handle & 0xFFFFu) != fs) return 0;
+    }
+    return o == local_player() ? 2 : 1;
+}
+
+int avp_coop_may_select(uint32_t handle)
+{
+    if (!coop_live() || s_executing) return 1;
+    return owner_of(handle) == local_player();
+}
+
+int avp_coop_replay_ground(void)
+{
+    return coop_live() && s_executing;
+}
+
+int avp_coop_live(void)
+{
+    return coop_live();
+}
+
+static void ground_refresh(uint32_t ptr)
+{
+    uint32_t regs[6] = { 0 };
+    regs[5] = ptr;
+    avp_gcall_regs(AVP_GROUND_FN, regs, NULL, 0);
+}
+
+static void send_order(const uint8_t *buf, uint32_t len)
+{
+    if (!send_msg(MSG_ORDER, buf, len)) {
+        coop_fail("send order");
+        return;
+    }
+    InterlockedIncrement(&s_ord_sent);
+}
+
+static void send_mirror(uint32_t player, const uint8_t *buf, uint32_t len)
+{
+    uint8_t m[CP_ORDER_WIRE_MAX + 4];
+    if (len > CP_ORDER_WIRE_MAX) return;
+    memcpy(m, &player, 4);
+    memcpy(m + 4, buf, len);
+    if (!send_msg(MSG_MIRROR, m, len + 4)) coop_fail("send mirror");
+}
+
+static void emit(const uint8_t *buf, uint32_t len)
+{
+    if (s_role == ROLE_GUEST) send_order(buf, len);
+    else send_mirror(0, buf, len);
+}
+
+static uint32_t map_h(uint32_t h)
+{
+    return s_role == ROLE_HOST ? h : cp_map_to_host(h);
+}
+
+static void pointer_aim(uint32_t ptr, uint32_t *under, float *world)
+{
+    uint32_t i, h = G32(ptr + 0xDC);
+    *under = h ? map_h(h) : 0;
+    for (i = 0; i < 3; i++) {
+        float v = GF(ptr + 0x1A8 + 4 * i);
+        world[i] = (v == v && v > -1.0e6f && v < 1.0e6f) ? v : 0.0f;
+    }
+}
+
+static uint32_t s_sel_sent[SEL_MAX], s_nsel_sent;
+
+static int cap_mode(void)
+{
+    if (!s_local_input || s_executing) return 0;
+    if (guest_live()) return 1;
+    if (s_role == ROLE_HOST && coop_live()) return 2;
+    return 0;
+}
+
+static void sel_sync(void)
+{
+    uint32_t cl[SEL_MAX], hh[SEL_MAX], n, i, m = 0;
+    uint8_t buf[8 + 4 * SEL_MAX];
+    uint32_t ptr = G32(AVP_POINTER);
+    if (!coop_live() || !sane_guest_ptr(ptr)) return;
+    n = cp_read_selection(ptr, cl, SEL_MAX);
+    for (i = 0; i < n; i++) {
+        uint32_t h = map_h(cl[i]);
+        if (h) hh[m++] = h;
+    }
+    if (m == s_nsel_sent && !memcmp(hh, s_sel_sent, m * 4u)) return;
+    emit(buf, cp_enc_select(buf, hh, m));
+    memcpy(s_sel_sent, hh, m * 4u);
+    s_nsel_sent = m;
+}
+
+static int order_has_no_dest(uint32_t order)
+{
+    return G32(order + 0x10) == G32(AVP_NOWHERE) && G32(order + 0x14) == G32(AVP_NOWHERE + 4u)
+        && G32(order + 0x18) == G32(AVP_NOWHERE + 8u);
+}
+
+static int ord_stack_ok(uint32_t v, uint32_t esp)
+{
+    return sane_guest_ptr(v) || (v >= esp - 0x4000u && v < esp + 0x4000u);
+}
+
+int avp_coop_take_move(uint32_t esp)
+{
+    uint8_t buf[64];
+    uint32_t ptr, ord, part, under, nowhere, mtype, particle = 0xFFu, queue;
+    float pos[3] = { 0, 0, 0 }, world[3];
+    int pi, cap = cap_mode();
+    if (!cap) return 0;
+    ptr = G32(esp + 4);
+    ord = G32(esp + 8);
+    part = G32(esp + 12);
+    queue = (G32(esp + 16) & 0xFFu) != 0;
+    if (!sane_guest_ptr(ptr) || ptr != G32(AVP_POINTER) || !ord_stack_ok(ord, esp)) {
+        static int told;
+        if (told++ < 5) fprintf(stderr, "[COOP] move not captured: pointer %08X (native %08X) message %08X esp %08X\n", ptr, G32(AVP_POINTER), ord, esp);
+        return cap == 1;
+    }
+    mtype = G32(ord);
+    if (mtype != 0x60039u && mtype != 0x6007Cu) {
+        static int told;
+        if (told++ < 5) fprintf(stderr, "[COOP] move order type %08X is not forwarded\n", mtype);
+        return cap == 1;
+    }
+    nowhere = order_has_no_dest(ord) ? 1u : 0u;
+    if (nowhere) {
+        ground_refresh(ptr);
+    } else {
+        uint32_t i;
+        for (i = 0; i < 3; i++) {
+            float v = GF(ord + 0x10 + 4 * i);
+            pos[i] = (v == v && v > -1.0e6f && v < 1.0e6f) ? v : 0.0f;
+        }
+    }
+    if (part) {
+        pi = cp_particle_index(part - ptr);
+        if (pi < 0) return cap == 1;
+        particle = (uint32_t)pi;
+    }
+    sel_sync();
+    pointer_aim(ptr, &under, world);
+    emit(buf, cp_enc_move(buf, mtype == 0x6007Cu ? 1u : 0u, nowhere, pos, queue, particle, under, world));
+    return cap == 1;
+}
+
+int avp_coop_take_pcall(uint32_t fn, uint32_t esp, uint32_t eax, uint32_t ecx, uint32_t edx, uint32_t ebx,
+                        uint32_t esi, uint32_t edi)
+{
+    uint8_t buf[32];
+    uint32_t ptr, param = 0, under;
+    float world[3];
+    int idx = cp_pcall_find(fn), cap;
+    (void)eax; (void)ecx; (void)edx; (void)ebx; (void)esi;
+    if (idx < 0) return 0;
+    cap = cap_mode();
+    if (!cap) return 0;
+    ptr = G32(AVP_POINTER);
+    if (!sane_guest_ptr(ptr)) return 0;
+    if (fn == 0x0002CAC0u) {
+        param = (G32(esp + 8) & 0xFFu) != 0;
+        ground_refresh(ptr);
+    } else if (fn == 0x0002E130u) {
+        param = edi;
+    }
+    if (!cp_pcall_param_ok((uint32_t)idx, param)) return cap == 1;
+    sel_sync();
+    pointer_aim(ptr, &under, world);
+    emit(buf, cp_enc_pcall(buf, (uint32_t)idx, param, under, world));
+    return cap == 1;
+}
+
+int avp_coop_take_order(uint32_t unit, uint32_t msg)
+{
+    uint8_t raw[CP_MSG_MAX], buf[24 + CP_MSG_MAX];
+    uint32_t type, size, h, hh, i, entry;
+    int cap = cap_mode();
+    if (!cap || !sane_guest_ptr(unit) || !sane_guest_ptr(msg)) return 0;
+    h = G32(unit + 0x18);
+    if (cap == 2 && owner_of(h) == 1) return 0;
+    if (cap == 1 && owner_of(h) != 1) return 1;
+    type = G32(msg);
+    if (!cp_order_type_ok(type)) {
+        static int told;
+        if (told++ < 8) fprintf(stderr, "[COOP] order type %08X is not forwarded\n", type);
+        return cap == 1;
+    }
+    entry = CP_MSG_TYPES + (type & 0xFFu) * 12u;
+    size = G32(entry) ? G32(entry + 4u) : 0;
+    if (size < 12u || size > CP_MSG_MAX || (size & 3u)) return cap == 1;
+    for (i = 0; i < size; i++) raw[i] = G8(msg + i);
+    if (cap == 1 && !cp_order_xlate_out(type, raw, size)) return 1;
+    hh = map_h(h);
+    if (!hh) return cap == 1;
+    sel_sync();
+    emit(buf, cp_enc_order(buf, hh, type, raw[8] & 15u, raw, size));
+    return cap == 1;
+}
+
+int avp_coop_take_reinf(uint32_t who, uint32_t esp)
+{
+    uint8_t buf[48];
+    uint32_t types[7], i, drop, dh = 0;
+    int cap = cap_mode();
+    (void)who;
+    if (!cap) return 0;
+    for (i = 0; i < 7; i++) types[i] = G32(0x002F6A90u + 4 * i);
+    if (cap == 1) {
+        static int told;
+        if (told++ < 3) fprintf(stderr, "[COOP] reinforcements are ordered by the host; the guest's request is dropped\n");
+        for (i = 0; i < 7; i++) G32(0x002F6A90u + 4 * i) = 0;
+        return 1;
+    }
+    drop = G32(esp + 12);
+    if (sane_guest_ptr(drop) && cp_obj_ok(drop)) dh = G32(drop + 0x18);
+    emit(buf, cp_enc_reinf(buf, G32(esp + 4), G32(esp + 8), dh, types));
+    return 0;
+}
+
+int avp_coop_take_buy(uint32_t self)
+{
+    uint8_t buf[8];
+    uint32_t who, world, pm, i;
+    int cap = cap_mode();
+    if (!cap || !sane_guest_ptr(self)) return 0;
+    who = G32(self + 0x18) & 0xFFFFu;
+    world = G32(AVP_WORLD);
+    if (who >= 0x20u || !sane_guest_ptr(world)) return 0;
+    pm = G32(world + CP_PM_ARRAY + 4u * who);
+    if (!sane_guest_ptr(pm)) return 0;
+    for (i = 0; i < 0x14u; i++)
+        if (G32(pm + 0x1D4 + 4 * i) == self) {
+            emit(buf, cp_enc_buy(buf, i));
+            return cap == 1;
+        }
+    return 0;
+}
+
 static void hide_pointer(uint32_t p);
 static uint32_t s_ptr[2];
-static uint32_t s_sel_pending[SEL_MAX];
-static int s_nsel_pending;
 
 static int ptr_obj_ok(uint32_t p)
 {
-    return p >= 0x10000u && !(p & 3u) && p < LOCAL_HI - 0x1000u - PTR_BYTES;
+    return p >= 0x10000u && !(p & 3u) && p < CP_LOCAL_HI - 0x1000u - 0x280u;
 }
 
 static int ptr_class_ok(uint32_t p)
@@ -1225,8 +1335,8 @@ static uint32_t player_pointer(int player)
     if (player < 0 || player > 1) return 0;
     h = s_ptr[player];
     if (!h) return 0;
-    obj = G32(AVP_OBJ_TABLE + (h >> 16) * 4u);
-    if (!ptr_obj_ok(obj) || G32(obj + 0x18) != h || !ptr_class_ok(obj)) return 0;
+    obj = cp_obj_of(h);
+    if (!ptr_obj_ok(obj) || !ptr_class_ok(obj)) return 0;
     return obj;
 }
 
@@ -1235,7 +1345,7 @@ static void make_pointers(void)
     uint32_t world = G32(AVP_WORLD), pm, a[2], b, cur, cur2, own = G32(AVP_POINTER);
     s_ptr[0] = s_ptr[1] = 0;
     if (!ptr_class_ok(own)) { fprintf(stderr, "[COOP] no usable pointer object (%08X) for the local player\n", own); return; }
-    s_ptr[0] = G32(own + 0x18);
+    s_ptr[local_player()] = G32(own + 0x18);
     pm = ptr_obj_ok(world) ? G32(world + 0x78) : 0;
     if (!ptr_obj_ok(pm) || !G32(pm + 0x19C)) { fprintf(stderr, "[COOP] no player manager for a second pointer\n"); return; }
     a[0] = G32(pm + 0x19C);
@@ -1246,9 +1356,10 @@ static void make_pointers(void)
     G32(AVP_POINTER) = cur;
     G32(AVP_PTR_GLOBAL2) = cur2;
     if (!ptr_class_ok(b)) { fprintf(stderr, "[COOP] could not create player 2's pointer\n"); return; }
-    s_ptr[1] = G32(b + 0x18);
+    s_ptr[1 - local_player()] = G32(b + 0x18);
+    G32(b + 0x22C) = 0;
     hide_pointer(b);
-    fprintf(stderr, "[COOP] pointers: host %08X, player 2 %08X (object %08X)\n", s_ptr[0], s_ptr[1], b);
+    fprintf(stderr, "[COOP] pointers: host %08X, player 2 %08X (hidden object %08X, local player %d)\n", s_ptr[0], s_ptr[1], b, local_player());
 }
 
 static void hide_pointer(uint32_t p)
@@ -1266,40 +1377,10 @@ static uint32_t swap_pointer(uint32_t p)
     return old;
 }
 
-static int ptr_keep(uint32_t off)
-{
-    return off < 0x1C || (off >= 0x1B8 && off < 0x1C0) || (off >= 0x270 && off < 0x278)
-        || (off >= 0x70 && off < 0xDC) || (off >= 0x10C && off < 0x178) || (off >= 0x21C && off < 0x22C);
-}
-
-typedef struct { uint8_t b[PTR_BYTES]; } PtrSave;
-
-static void ptr_save(uint32_t p, PtrSave *s)
-{
-    uint32_t off;
-    for (off = 0; off < PTR_BYTES; off += 4) {
-        uint32_t v = G32(p + off);
-        memcpy(s->b + off, &v, 4);
-    }
-}
-
-static void ptr_restore(uint32_t p, const PtrSave *s)
-{
-    uint32_t off;
-    for (off = 0; off < PTR_BYTES; off += 4) {
-        uint32_t v;
-        if (ptr_keep(off)) continue;
-        memcpy(&v, s->b + off, 4);
-        G32(p + off) = v;
-    }
-}
-
 static void run_select(int player, const uint32_t *h, uint32_t n)
 {
     uint32_t p = player_pointer(player), old, i, a[2];
-    PtrSave keep;
     if (!p) return;
-    ptr_save(p, &keep);
     old = swap_pointer(p);
     avp_gcall(G32(G32(p) + 0xB4), p, NULL, 0, 0);
     for (i = 0; i < n; i++) {
@@ -1309,8 +1390,7 @@ static void run_select(int player, const uint32_t *h, uint32_t n)
         avp_gcall(AVP_SELECT_FN, p, a, 2, 0);
     }
     swap_pointer(old);
-    ptr_restore(p, &keep);
-    if (player == 1) hide_pointer(p);
+    if (player != local_player()) hide_pointer(p);
 }
 
 static void run_deselect(int player, uint32_t h)
@@ -1323,770 +1403,525 @@ static void run_deselect(int player, uint32_t h)
     swap_pointer(old);
 }
 
-enum { ARG_RAW = 0, ARG_PTRFIELD = 1, ARG_BLOB = 2 };
-#define ARG_BLOB_MAX 0x80u
-
-static void run_move(int player, const uint8_t *d, uint32_t n)
+static void prune_selection(int player, uint32_t p)
 {
-    uint32_t p = player_pointer(player), old, off, a[4], esp, o = 0, i;
-    PtrSave keep;
-    if (!p || n < PTR_BYTES) return;
-    ptr_save(p, &keep);
-    for (off = 0; off < PTR_BYTES; off += 4) {
-        uint32_t v;
-        if (ptr_keep(off)) continue;
-        memcpy(&v, d + off, 4);
-        G32(p + off) = v;
-    }
-    o = PTR_BYTES;
-    old = swap_pointer(p);
-    esp = avp_guest_esp();
-    a[0] = p;
-    for (i = 1; i < 4; i++) {
-        uint32_t kind, val, len;
-        if (o + 12 > n) {
-            avp_guest_set_esp(esp);
-            swap_pointer(old);
-            ptr_restore(p, &keep);
-            if (player == 1) hide_pointer(p);
-            return;
-        }
-        memcpy(&kind, d + o, 4);
-        memcpy(&val, d + o + 4, 4);
-        memcpy(&len, d + o + 8, 4);
-        o += 12;
-        if (kind == ARG_PTRFIELD) {
-            a[i] = p + val;
-        } else if (kind == ARG_BLOB && len <= ARG_BLOB_MAX && o + len <= n) {
-            uint32_t buf = avp_guest_alloca(len), k;
-            for (k = 0; k < len; k++) G8(buf + k) = d[o + k];
-            a[i] = buf + val;
-            o += len;
-        } else {
-            a[i] = val;
-        }
-    }
-    avp_gcall(AVP_MOVE_FN, p, a, 4, 0);
-    avp_guest_set_esp(esp);
-    swap_pointer(old);
-    ptr_restore(p, &keep);
-    if (player == 1) hide_pointer(p);
+    uint32_t sel[SEL_MAX], n = cp_read_selection(p, sel, SEL_MAX), i;
+    for (i = 0; i < n; i++)
+        if (owner_of(sel[i]) != player) run_deselect(player, sel[i]);
 }
 
-static const struct { uint32_t fn, nstack; } k_pcall[] = {
-    { 0x2C880u, 0 }, { 0x2C990u, 1 }, { 0x2CAC0u, 2 }, { 0x2CCD0u, 0 }, { 0x2CD60u, 0 }, { 0x2CE70u, 0 },
-    { 0x2CF60u, 0 }, { 0x2D050u, 0 }, { 0x2D0E0u, 0 }, { 0x2D1D0u, 0 }, { 0x2D2C0u, 0 }, { 0x2D350u, 0 },
-    { 0x2D440u, 0 }, { 0x2D580u, 0 }, { 0x2D670u, 0 }, { 0x2D760u, 0 }, { 0x2DD20u, 1 }, { 0x2DE70u, 0 },
-    { 0x2DF90u, 0 }, { 0x2DFD0u, 0 }, { 0x2E130u, 0 }, { 0x2ED80u, 0 },
-};
+#define HIDE_MAX 256u
+static uint32_t s_hide_h[HIDE_MAX], s_hide_head;
+static uint32_t s_scan[0x10000];
+static int s_show_other_marks = -1;
 
-#define PCALL_REGS  6
-#define PCALL_STACK 2
-
-static int pcall_nstack(uint32_t fn)
+static void marks_begin(void)
 {
     uint32_t i;
-    for (i = 0; i < sizeof k_pcall / sizeof k_pcall[0]; i++)
-        if (k_pcall[i].fn == fn) return (int)k_pcall[i].nstack;
-    return -1;
+    for (i = 1; i < 0x10000u; i++) s_scan[i] = G32(AVP_OBJ_TABLE + i * 4u);
+    s_scan[0] = 1;
 }
 
-static void run_pcall(int player, const uint8_t *d, uint32_t n)
+static void marks_end(void)
 {
-    uint32_t p = player_pointer(player), old, off, fn, nstack, regs[PCALL_REGS], args[PCALL_STACK], esp, o, i;
-    PtrSave keep;
-    if (!p || n < 8) return;
-    memcpy(&fn, d, 4);
-    memcpy(&nstack, d + 4, 4);
-    if (nstack > PCALL_STACK || pcall_nstack(fn) != (int)nstack) return;
-    if (n != 8 + 8 * (PCALL_REGS + nstack) + PTR_BYTES) return;
-    o = 8;
-    for (i = 0; i < PCALL_REGS + nstack; i++) {
-        uint32_t kind, val;
-        memcpy(&kind, d + o, 4);
-        memcpy(&val, d + o + 4, 4);
-        o += 8;
-        if (kind == ARG_PTRFIELD) val = p;
-        if (i < PCALL_REGS) regs[i] = val;
-        else args[i - PCALL_REGS] = val;
+    uint32_t i;
+    if (!s_scan[0]) return;
+    s_scan[0] = 0;
+    for (i = 1; i < 0x10000u; i++) {
+        uint32_t obj = G32(AVP_OBJ_TABLE + i * 4u);
+        if (obj == s_scan[i] || !cp_obj_ok(obj)) continue;
+        s_hide_h[s_hide_head++ % HIDE_MAX] = G32(obj + 0x18);
     }
-    ptr_save(p, &keep);
-    for (off = 0; off < PTR_BYTES; off += 4) {
-        uint32_t v;
-        if (ptr_keep(off)) continue;
-        memcpy(&v, d + o + off, 4);
-        G32(p + off) = v;
+}
+
+int avp_coop_hide_marker(uint32_t obj)
+{
+    uint32_t h, i;
+    if (s_show_other_marks < 0) {
+        const char *e = getenv("AVP_COOP_SHOW_OTHER_MARKERS");
+        s_show_other_marks = e && *e && *e != '0';
     }
-    old = swap_pointer(p);
-    esp = avp_guest_esp();
-    avp_gcall_regs(fn, regs, args, (int)nstack);
-    avp_guest_set_esp(esp);
-    swap_pointer(old);
-    ptr_restore(p, &keep);
-    if (player == 1) hide_pointer(p);
+    if (s_show_other_marks || s_role == ROLE_NONE || !s_hide_head) return 0;
+    h = G32(obj + 0x18);
+    for (i = 0; i < HIDE_MAX; i++)
+        if (s_hide_h[i] == h) return 1;
+    return 0;
 }
 
-#define AVP_MARKER_MAKE 0x0002EFF0u
-#define MARKER_BYTES    16u
-
-static int marker_crc_ok(uint32_t crc)
+static int reject(const char *why, const CpOrder *o)
 {
-    return crc == 0x7715B5E5u || crc == 0x55EE21EFu || crc == 0x3C905527u;
+    static int told;
+    InterlockedIncrement(&s_ord_rej);
+    if (told++ < 20) fprintf(stderr, "[COOP] rejected order (cmd %u): %s\n", o->cmd, why);
+    return 0;
 }
 
-static int marker_pos_ok(const float *v)
+static void exec_select(const CpOrder *o, int player)
 {
-    int i;
-    for (i = 0; i < 3; i++)
-        if (!(v[i] > -1e7f && v[i] < 1e7f)) return 0;
-    return 1;
-}
-
-static void run_marker(int player, const uint8_t *d, uint32_t n)
-{
-    uint32_t p = player_pointer(player), old, crc, esp, pos, regs[PCALL_REGS] = { 0 }, a[2];
-    float v[3];
-    PtrSave keep;
-    if (!p || n != MARKER_BYTES) return;
-    memcpy(&crc, d, 4);
-    memcpy(v, d + 4, sizeof v);
-    if (!marker_crc_ok(crc) || !marker_pos_ok(v)) return;
-    ptr_save(p, &keep);
-    old = swap_pointer(p);
-    esp = avp_guest_esp();
-    pos = avp_guest_alloca(32);
-    memcpy((void *)((uintptr_t)pos + (uintptr_t)g_xbox_mem_offset), v, sizeof v);
-    regs[0] = crc;
-    a[0] = p;
-    a[1] = pos;
-    avp_gcall_regs(AVP_MARKER_MAKE, regs, a, 2);
-    avp_guest_set_esp(esp);
-    swap_pointer(old);
-    ptr_restore(p, &keep);
-    if (player == 1) hide_pointer(p);
-}
-
-int avp_coop_marked(uint32_t handle)
-{
-    return !s_vs && coop_live() && owner_of(handle) == 1;
-}
-
-int avp_coop_may_select(uint32_t handle)
-{
-    if (!coop_live() || s_executing) return 1;
-    if (s_local_input) {
-        if (owner_of(handle) == local_player() && s_nsel_pending < SEL_MAX)
-            s_sel_pending[s_nsel_pending++] = handle;
-        return 0;
+    uint32_t hs[SEL_MAX], n = 0, i;
+    for (i = 0; i < o->n && i < SEL_MAX; i++) {
+        if (!cp_unit_ok(o->h[i])) continue;
+        if (owner_of(o->h[i]) != player) continue;
+        hs[n++] = o->h[i];
     }
-    return owner_of(handle) == local_player();
-}
-
-int avp_coop_take_move(uint32_t esp)
-{
-    uint8_t buf[4 + PTR_BYTES + 3 * (12 + ARG_BLOB_MAX)];
-    uint32_t ptr, off, o, i, cmd = CMD_MOVE, type = 0;
-    if (!coop_live() || s_executing || !s_local_input) return 0;
-    ptr = G32(esp + 4);
-    if (!ptr_obj_ok(ptr)) return 0;
-    memcpy(buf, &cmd, 4);
-    for (off = 0; off < PTR_BYTES; off += 4) {
-        uint32_t v = G32(ptr + off);
-        memcpy(buf + 4 + off, &v, 4);
-    }
-    o = 4 + PTR_BYTES;
-    for (i = 1; i < 4; i++) {
-        uint32_t v = G32(esp + 4 + 4 * i), kind = ARG_RAW, val = v, len = 0;
-        if (v >= ptr && v < ptr + PTR_BYTES) {
-            kind = ARG_PTRFIELD;
-            val = v - ptr;
-        } else if (v >= esp - 0x1000u && v < esp + 0x1000u) {
-            uint32_t base = v & ~3u, k;
-            kind = ARG_BLOB;
-            len = ARG_BLOB_MAX;
-            val = v - base;
-            for (k = 0; k < len; k++) buf[o + 12 + k] = G8(base + k);
-            if (i == 1) type = G32(v);
-        }
-        memcpy(buf + o, &kind, 4);
-        memcpy(buf + o + 4, &val, 4);
-        memcpy(buf + o + 8, &len, 4);
-        o += 12 + len;
-    }
-    if (!avp_coop_queue(buf, o)) return 0;
+    run_select(player, hs, n);
     {
         static int told;
-        if (told++ < 10)
-            fprintf(stderr, "[COOP] move sent: type %08X args %08X %08X %08X (esp %08X, pointer %08X)\n", type,
-                    G32(esp + 8), G32(esp + 12), G32(esp + 16), esp, ptr);
-    }
-    return 1;
-}
-
-int avp_coop_take_pcall(uint32_t fn, uint32_t esp, uint32_t eax, uint32_t ecx, uint32_t edx, uint32_t ebx,
-                        uint32_t esi, uint32_t edi)
-{
-    uint8_t buf[12 + 8 * (PCALL_REGS + PCALL_STACK) + PTR_BYTES];
-    uint32_t regs[PCALL_REGS] = { eax, ecx, edx, ebx, esi, edi };
-    uint32_t ptr, off, o, i, cmd = CMD_PCALL, ns;
-    int nstack = pcall_nstack(fn);
-    if (!coop_live() || s_executing || !s_local_input || nstack < 0) return 0;
-    ptr = G32(AVP_POINTER);
-    if (!ptr_obj_ok(ptr)) return 0;
-    ns = (uint32_t)nstack;
-    memcpy(buf, &cmd, 4);
-    memcpy(buf + 4, &fn, 4);
-    memcpy(buf + 8, &ns, 4);
-    o = 12;
-    for (i = 0; i < PCALL_REGS + ns; i++) {
-        uint32_t v = i < PCALL_REGS ? regs[i] : G32(esp + 4 + 4 * (i - PCALL_REGS)), kind = ARG_RAW, val = v;
-        if (v == ptr) {
-            kind = ARG_PTRFIELD;
-            val = 0;
-        }
-        memcpy(buf + o, &kind, 4);
-        memcpy(buf + o + 4, &val, 4);
-        o += 8;
-    }
-    for (off = 0; off < PTR_BYTES; off += 4) {
-        uint32_t v = G32(ptr + off);
-        memcpy(buf + o + off, &v, 4);
-    }
-    o += PTR_BYTES;
-    if (!avp_coop_queue(buf, o)) return 0;
-    {
-        static int told;
-        if (told++ < 10) fprintf(stderr, "[COOP] pointer call %08X sent\n", fn);
-    }
-    return 1;
-}
-
-int avp_coop_marker(uint32_t crc, const float *pos)
-{
-    uint8_t buf[4 + MARKER_BYTES];
-    uint32_t cmd = CMD_MARKER;
-    if (s_role == ROLE_NONE) return -1;
-    if (!coop_live()) return -1;
-    if (s_executing || !s_local_input) return 0;
-    if (!marker_crc_ok(crc) || !marker_pos_ok(pos)) return 0;
-    memcpy(buf, &cmd, 4);
-    memcpy(buf + 4, &crc, 4);
-    memcpy(buf + 8, pos, 12);
-    return avp_coop_queue(buf, sizeof buf) ? 1 : 0;
-}
-
-static uint32_t s_fx_rng[2] = { 0x13579BDFu, 0x2468ACE0u };
-static uint32_t s_fx_saved[2];
-static int s_fx_depth;
-
-static uint32_t s_fx_callers[16] = { 0x0005D413u };
-static int s_fx_ncallers = 1;
-
-void avp_coop_fx_rng(int enter, uint32_t obj)
-{
-    int i;
-    if (!s_fixed && !s_fx_depth) return;
-    {
-        static uint8_t swapped[64];
-        static int sp;
-        if (enter) {
-            int sw = obj >= 0x000F9000u && obj < 0x000FD000u;
-            for (i = 0; i < s_fx_ncallers; i++)
-                if (s_fx_callers[i] == obj) sw = 1;
-            if (sw && s_fx_depth++ == 0) {
-                s_fx_saved[0] = G32(AVP_RNG_ACC);
-                s_fx_saved[1] = G32(AVP_RNG_SEED);
-                G32(AVP_RNG_ACC) = s_fx_rng[0];
-                G32(AVP_RNG_SEED) = s_fx_rng[1];
-            }
-            if (sp < 64) swapped[sp] = (uint8_t)sw;
-            sp++;
-        } else if (sp > 0) {
-            sp--;
-            if (sp < 64 && swapped[sp] && s_fx_depth > 0 && --s_fx_depth == 0) {
-                s_fx_rng[0] = G32(AVP_RNG_ACC);
-                s_fx_rng[1] = G32(AVP_RNG_SEED);
-                G32(AVP_RNG_ACC) = s_fx_saved[0];
-                G32(AVP_RNG_SEED) = s_fx_saved[1];
-            }
-        }
-    }
-}
-
-void avp_coop_rng_site(uint32_t loc)
-{
-    static int lo = -1, hi;
-    uint64_t t;
-    if (lo < 0) {
-        const char *e = getenv("AVP_RNGSITE");
-        lo = 190; hi = 240;
-        if (e && *e) sscanf(e, "%d-%d", &lo, &hi);
-    }
-    if (!s_mission) return;
-    t = s_tick - s_mission_tick - 1;
-    if ((int64_t)t >= lo && (int64_t)t <= hi) {
-        fprintf(stderr, "[RNGSITE] %llu %08X %08X%s\n", (unsigned long long)t, loc, G32(AVP_RNG_SEED),
-                s_local_input ? " input" : "");
-        if (getenv("AVP_RNGSTACK") && (loc == 0xC005CF6Cu || loc == 0xC003930Bu)) {
-            extern uint32_t avp_guest_esp(void);
-            uint32_t sp = avp_guest_esp(), k, shown = 0;
-            fprintf(stderr, "[RNGSTACK] %llu %08X:", (unsigned long long)t, loc);
-            for (k = 0; k < 0x400 && shown < 12; k += 4) {
-                uint32_t v = G32(sp + k);
-                if (v >= 0x00011000u && v < 0x00170000u) { fprintf(stderr, " %08X", v); shown++; }
-            }
+        if (s_role == ROLE_HOST && told++ < 20) {
+            uint32_t sel[SEL_MAX], m = cp_read_selection(player_pointer(player), sel, SEL_MAX), k;
+            fprintf(stderr, "[COOP] select: %u sent, %u passed owner filter, %u now selected on the host pointer; owners:", o->n, n, m);
+            for (k = 0; k < o->n && k < 8; k++) fprintf(stderr, " %08X=%d", o->h[k], owner_of(o->h[k]));
             fprintf(stderr, "\n");
         }
     }
 }
 
-void avp_coop_visit(uint32_t obj)
+typedef struct { uint32_t under; float w[3]; } AimSave;
+
+static void aim_pointer(uint32_t p, uint32_t under, const float *world, AimSave *sv)
 {
-    static int want = -2;
-    if (want == -2) {
-        const char *e = getenv("AVP_VISIT_TICK");
-        want = e && *e ? atoi(e) : -1;
+    uint32_t i;
+    sv->under = G32(p + 0xDC);
+    for (i = 0; i < 3; i++) sv->w[i] = GF(p + 0x1A8 + 4 * i);
+    G32(p + 0xDC) = (under && cp_target_ok(under)) ? under : 0;
+    for (i = 0; i < 3; i++) GF(p + 0x1A8 + 4 * i) = world[i];
+}
+
+static void aim_restore(uint32_t p, int player, const AimSave *sv)
+{
+    uint32_t i;
+    if (player != local_player()) return;
+    G32(p + 0xDC) = sv->under;
+    for (i = 0; i < 3; i++) GF(p + 0x1A8 + 4 * i) = sv->w[i];
+}
+
+static void exec_move(const CpOrder *o, int player)
+{
+    uint32_t p = player_pointer(player), esp, msg, a[4], type, i, part, old;
+    AimSave sv;
+    float before[3], after[3];
+    if (!p) { reject("no pointer for the player", o); return; }
+    type = o->a ? 0x6007Cu : 0x60039u;
+    prune_selection(player, p);
+    aim_pointer(p, o->h[0], o->f + 3, &sv);
+    for (i = 0; i < 3; i++) before[i] = GF(p + 0x1A8 + 4 * i);
+    esp = avp_guest_esp();
+    msg = avp_guest_alloca(0x30);
+    for (i = 0; i < 0x30; i += 4) G32(msg + i) = 0;
+    G32(msg) = type;
+    G8(msg + 8) = 5;
+    if (o->b) {
+        for (i = 0; i < 3; i++) G32(msg + 0x10 + 4 * i) = G32(AVP_NOWHERE + 4 * i);
+    } else {
+        for (i = 0; i < 3; i++) GF(msg + 0x10 + 4 * i) = o->f[i];
     }
-    if (want < 0 || !s_mission) return;
-    if ((int64_t)(s_tick - s_mission_tick - 1) == want)
-        fprintf(stderr, "[VISIT] %08X %08X %08X\n", obj >= 0x10000u && obj < 0x84000000u ? G32(obj + 0x18) : 0,
-                obj >= 0x10000u && obj < 0x84000000u ? G32(obj) : 0, obj);
+    G8(msg + 0x24) = (uint8_t)o->c;
+    part = o->d == 0xFFu ? 0 : p + cp_particle_off(o->d);
+    a[0] = p;
+    a[1] = msg;
+    a[2] = part;
+    a[3] = o->c;
+    old = swap_pointer(p);
+    if (player != local_player()) marks_begin();
+    avp_gcall(AVP_MOVE_FN, p, a, 4, 0);
+    if (player != local_player()) marks_end();
+    avp_guest_set_esp(esp);
+    swap_pointer(old);
+    for (i = 0; i < 3; i++) after[i] = GF(p + 0x1A8 + 4 * i);
+    {
+        static int told;
+        if (s_role == ROLE_HOST && told++ < 20) {
+            uint32_t sel[SEL_MAX], n = cp_read_selection(p, sel, SEL_MAX), k;
+            fprintf(stderr, "[COOP] move: %u selected, nowhere %u, dest %.1f %.1f %.1f -> %.1f %.1f %.1f, owners:", n, o->b,
+                    (double)before[0], (double)before[1], (double)before[2], (double)after[0], (double)after[1], (double)after[2]);
+            for (k = 0; k < n && k < 8; k++) fprintf(stderr, " %08X=%d moveto %.1f %.1f %.1f", sel[k], owner_of(sel[k]),
+                    (double)GF(cp_obj_of(sel[k]) + 0x4A4), (double)GF(cp_obj_of(sel[k]) + 0x4A8), (double)GF(cp_obj_of(sel[k]) + 0x4AC));
+            fprintf(stderr, "\n");
+        }
+    }
+    aim_restore(p, player, &sv);
+    if (player != local_player()) hide_pointer(p);
 }
 
-static void rng_save(void)
+static void exec_pcall(const CpOrder *o, int player)
 {
-    if (!coop_live()) return;
-    s_rng_save[0] = G32(AVP_RNG_ACC);
-    s_rng_save[1] = G32(AVP_RNG_SEED);
-    s_rng_saved = 1;
+    uint32_t p = player_pointer(player), fn = cp_pcall_fn(o->a), regs[6] = { 0 }, args[2] = { 0 }, esp, old;
+    int reg = cp_pcall_this_reg(o->a);
+    uint32_t ns = cp_pcall_nstack(o->a);
+    AimSave sv;
+    if (!p || !fn) { reject("no pointer for the player", o); return; }
+    prune_selection(player, p);
+    aim_pointer(p, o->h[0], o->f + 3, &sv);
+    if (reg >= 0) regs[reg] = p;
+    if (ns >= 1) args[0] = p;
+    if (ns >= 2) args[1] = o->b;
+    if (fn == 0x0002E130u) regs[5] = o->b;
+    old = swap_pointer(p);
+    esp = avp_guest_esp();
+    if (player != local_player()) marks_begin();
+    avp_gcall_regs(fn, regs, args, (int)ns);
+    if (player != local_player()) marks_end();
+    avp_guest_set_esp(esp);
+    swap_pointer(old);
+    aim_restore(p, player, &sv);
+    if (player != local_player()) hide_pointer(p);
 }
 
-static void rng_restore(void)
+static void exec_order_msg(const CpOrder *o, int player)
 {
-    if (!s_rng_saved) return;
-    G32(AVP_RNG_ACC) = s_rng_save[0];
-    G32(AVP_RNG_SEED) = s_rng_save[1];
-    s_rng_saved = 0;
+    uint8_t msg[CP_MSG_MAX];
+    uint32_t h = o->h[0], size;
+    if (!cp_unit_ok(h)) { reject("unit does not exist", o); return; }
+    if (owner_of(h) != player) { reject("unit is not the player's", o); return; }
+    size = cp_order_msg_build(o, msg, sizeof msg);
+    if (!size) { reject("message failed validation", o); return; }
+    avp_run_order(1, h, msg, size);
+}
+
+static void exec_buy(const CpOrder *o)
+{
+    uint32_t world = G32(AVP_WORLD), pm, btn;
+    if (!sane_guest_ptr(world)) return;
+    pm = G32(world + 0x78);
+    if (!sane_guest_ptr(pm) || o->a >= 0x14u) { reject("no player manager", o); return; }
+    btn = G32(pm + 0x1D4 + 4 * o->a);
+    if (!cp_obj_ok(btn) || cp_obj_of(G32(btn + 0x18)) != btn || (G32(btn + 0x18) & 0xFFFFu) != (G32(pm + 0x18) & 0xFFFFu)) {
+        reject("not a purchase button", o);
+        return;
+    }
+    avp_gcall(AVP_BUY_FN, 0, NULL, 0, btn);
+}
+
+static void exec_give(const CpOrder *o)
+{
+    uint32_t i, cnt = 0;
+    for (i = 0; i < o->n && i < SEL_MAX; i++) {
+        uint32_t h = o->h[i];
+        if (s_vs || !cp_unit_ok(h) || owner_of(h) != 1) continue;
+        run_deselect(1, h);
+        s_owner_h[h >> 16] = h;
+        s_owner[h >> 16] = 0;
+        cnt++;
+    }
+    if (cnt) fprintf(stderr, "[COOP] %u unit%s given back to the host\n", cnt, cnt == 1 ? "" : "s");
+}
+
+static void exec_reinf(const CpOrder *o)
+{
+    uint32_t world = G32(AVP_WORLD), pm, who, drop = 0, i, a[3], ch;
+    if (s_role != ROLE_GUEST || !sane_guest_ptr(world)) return;
+    pm = G32(world + 0x78);
+    if (!sane_guest_ptr(pm)) return;
+    who = G32(pm + 0x18) & 0xFFFFu;
+    if (o->h[0]) {
+        ch = cp_map_to_client(o->h[0]);
+        drop = ch ? cp_obj_of(ch) : 0;
+    }
+    for (i = 0; i < 7; i++) G32(0x002F6A90u + 4 * i) = o->h[1 + i];
+    a[0] = o->a;
+    a[1] = o->b;
+    a[2] = drop;
+    avp_gcall(0x00050360u, 0, a, 3, who);
+}
+
+static int ord_pop(CpOrder *o, uint8_t *raw, uint32_t *rawlen)
+{
+    int ok = 0;
+    EnterCriticalSection(&s_lock);
+    if (s_ord_head != s_ord_tail) {
+        uint32_t k = s_ord_head % ORD_RING;
+        *o = s_ord[k];
+        *rawlen = s_ord_rawlen[k];
+        memcpy(raw, s_ord_raw[k], *rawlen);
+        s_ord_head++;
+        ok = 1;
+    }
+    LeaveCriticalSection(&s_lock);
+    return ok;
+}
+
+static int xlate_in(CpOrder *o)
+{
+    uint32_t i, n = 0;
+    switch (o->cmd) {
+    case CP_CMD_SELECT:
+        for (i = 0; i < o->n; i++) {
+            uint32_t c = cp_map_to_client(o->h[i]);
+            if (c) o->h[n++] = c;
+        }
+        o->n = n;
+        return 1;
+    case CP_CMD_MOVE:
+    case CP_CMD_PCALL:
+        o->h[0] = o->h[0] ? cp_map_to_client(o->h[0]) : 0;
+        return 1;
+    case CP_CMD_ORDER:
+        o->h[0] = cp_map_to_client(o->h[0]);
+        return o->h[0] && cp_order_xlate_in(o->b, o->msg, o->n);
+    case CP_CMD_BUY:
+    case CP_CMD_REINF:
+        return 1;
+    }
+    return 0;
+}
+
+static void orders_exec(void)
+{
+    CpOrder o;
+    uint8_t raw[CP_ORDER_WIRE_MAX];
+    uint32_t rawlen;
+    int n = 0;
+    while (n++ < 32 && ord_pop(&o, raw, &rawlen)) {
+        int player = (int)o.player;
+        LONG rej = s_ord_rej;
+        if (s_role == ROLE_GUEST && !xlate_in(&o)) continue;
+        s_executing = 1;
+        switch (o.cmd) {
+        case CP_CMD_SELECT: exec_select(&o, player); break;
+        case CP_CMD_MOVE: exec_move(&o, player); break;
+        case CP_CMD_PCALL: exec_pcall(&o, player); break;
+        case CP_CMD_ORDER: exec_order_msg(&o, player); break;
+        case CP_CMD_BUY: exec_buy(&o); break;
+        case CP_CMD_REINF: exec_reinf(&o); break;
+        case CP_CMD_GIVE: exec_give(&o); break;
+        }
+        s_executing = 0;
+        InterlockedIncrement(&s_ord_exec);
+        if (s_role == ROLE_HOST && rej == s_ord_rej && rawlen && o.cmd != CP_CMD_SELECT)
+            send_mirror(1, raw, rawlen);
+    }
+}
+
+int avp_coop_give_selection(void)
+{
+    uint32_t sel[SEL_MAX], n, i, cnt = 0;
+    if (guest_live() && !s_vs) {
+        uint32_t hh[SEL_MAX], m = 0;
+        uint8_t buf[8 + 4 * SEL_MAX];
+        n = cp_read_selection(G32(AVP_POINTER), sel, SEL_MAX);
+        for (i = 0; i < n; i++) {
+            uint32_t h;
+            if (owner_of(sel[i]) != 1) continue;
+            h = cp_map_to_host(sel[i]);
+            if (!h) continue;
+            hh[m++] = h;
+            run_deselect(1, sel[i]);
+            owner_set(sel[i], 0);
+        }
+        if (m) {
+            send_order(buf, cp_enc_give(buf, hh, m));
+            fprintf(stderr, "[COOP] giving %u unit%s back to the host\n", m, m == 1 ? "" : "s");
+        }
+        return (int)m;
+    }
+    if (!coop_live() || s_role != ROLE_HOST || s_vs) return 0;
+    n = cp_read_selection(G32(AVP_POINTER), sel, SEL_MAX);
+    for (i = 0; i < n; i++) {
+        if (owner_of(sel[i]) != 0 || !cp_unit_ok(sel[i])) continue;
+        run_deselect(0, sel[i]);
+        s_owner_h[sel[i] >> 16] = sel[i];
+        s_owner[sel[i] >> 16] = 1;
+        cnt++;
+    }
+    if (cnt) fprintf(stderr, "[COOP] %u unit%s given to player 2\n", cnt, cnt == 1 ? "" : "s");
+    return (int)cnt;
+}
+
+static uint8_t *s_sbuf;
+static HANDLE s_tx_thread, s_tx_event;
+static volatile LONG s_tx_quit, s_tx_pending;
+static uint32_t s_tx_len, s_tx_seq;
+static ULONGLONG s_tx_last, s_tx_full_last, s_gt_last, s_log_last;
+static volatile LONG s_tx_bytes, s_tx_msgs;
+static struct {
+    uint32_t sent, full, skipped, recs, objs, words, trunc;
+    uint64_t build_us, build_max;
+    uint32_t rx, bad, rx_dropped;
+    uint64_t apply_us, apply_max;
+    CpApplyStats ap;
+} s_st;
+static int s_hz = 10, s_full_ms = 2000;
+
+static DWORD WINAPI tx_thread(LPVOID arg)
+{
+    (void)arg;
+    while (!s_tx_quit) {
+        WaitForSingleObject(s_tx_event, 250);
+        if (s_tx_pending) {
+            uint32_t n = s_tx_len;
+            int ok = !s_coop_dead && send_msg(MSG_STATE, s_sbuf, n);
+            InterlockedExchangeAdd(&s_tx_bytes, (LONG)n);
+            InterlockedIncrement(&s_tx_msgs);
+            s_tx_pending = 0;
+            if (!ok) {
+                if (!s_coop_dead) coop_fail("send state");
+                break;
+            }
+        }
+    }
+    return 0;
+}
+
+static void tx_start(void)
+{
+    if (s_tx_thread || s_role != ROLE_HOST) return;
+    if (!s_sbuf) s_sbuf = (uint8_t *)malloc(CP_STATE_MAX);
+    if (!s_sbuf) { coop_fail("memory"); return; }
+    s_tx_quit = 0;
+    s_tx_pending = 0;
+    s_tx_event = CreateEventA(NULL, FALSE, FALSE, NULL);
+    s_tx_thread = CreateThread(NULL, 0, tx_thread, NULL, 0, NULL);
+}
+
+static void tx_stop(void)
+{
+    if (!s_tx_thread) return;
+    s_tx_quit = 1;
+    SetEvent(s_tx_event);
+    WaitForSingleObject(s_tx_thread, 3000);
+    CloseHandle(s_tx_thread);
+    CloseHandle(s_tx_event);
+    s_tx_thread = NULL;
+    s_tx_event = NULL;
+}
+
+static void state_cfg(void)
+{
+    const char *e = getenv("AVP_COOP_STATE_HZ");
+    if (e && atoi(e) >= 1) s_hz = atoi(e) > 60 ? 60 : atoi(e);
+    e = getenv("AVP_COOP_FULL_MS");
+    if (e && atoi(e) >= 250) s_full_ms = atoi(e);
+}
+
+static void state_tick_host(ULONGLONG now)
+{
+    CpBuildStats bs;
+    uint64_t t0, t1;
+    uint32_t len;
+    int full;
+    if (now - s_tx_last < (ULONGLONG)(1000 / s_hz) || !s_tx_thread) return;
+    if (s_tx_pending) {
+        s_st.skipped++;
+        return;
+    }
+    full = !s_tx_seq || now - s_tx_full_last >= (ULONGLONG)s_full_ms;
+    t0 = now_us();
+    len = cp_state_build(s_sbuf, CP_STATE_MAX, ++s_tx_seq, full, (uint32_t)now, &s_hooks, &bs);
+    t1 = now_us();
+    if (!len) return;
+    s_tx_len = len;
+    s_tx_pending = 1;
+    SetEvent(s_tx_event);
+    s_tx_last = now;
+    if (full) {
+        s_tx_full_last = now;
+        s_st.full++;
+    }
+    s_st.sent++;
+    s_st.recs += bs.records;
+    s_st.objs += bs.objects;
+    s_st.words += bs.words;
+    s_st.trunc += bs.truncated;
+    s_st.build_us += t1 - t0;
+    if (t1 - t0 > s_st.build_max) s_st.build_max = t1 - t0;
+}
+
+static int st_pop(uint32_t *slot, uint32_t *len)
+{
+    int ok = 0;
+    EnterCriticalSection(&s_lock);
+    if (s_st_head != s_st_tail) {
+        *slot = s_st_head % ST_RING;
+        *len = s_st_len[*slot];
+        ok = 1;
+    }
+    LeaveCriticalSection(&s_lock);
+    return ok;
+}
+
+static void st_done(void)
+{
+    EnterCriticalSection(&s_lock);
+    s_st_head++;
+    LeaveCriticalSection(&s_lock);
+}
+
+static void state_tick_guest(ULONGLONG now)
+{
+    uint32_t slot, len, n = 0;
+    ULONGLONG dt = s_gt_last ? now - s_gt_last : 16;
+    while (n++ < ST_RING && st_pop(&slot, &len)) {
+        const uint8_t *p = s_st_buf[slot];
+        uint32_t flags = rd32le(p + 8), seq = rd32le(p + 4);
+        if (s_st_skip && (!(flags & CP_FLAG_FULL) || (int32_t)(seq - s_st_dropseq) <= 0)) {
+            s_st.rx_dropped++;
+        } else {
+            uint64_t t0, t1;
+            if (flags & CP_FLAG_FULL) s_st_skip = 0;
+            t0 = now_us();
+            cp_state_apply(p, len, &s_hooks, &s_st.ap, (uint32_t)now);
+            t1 = now_us();
+            s_st.apply_us += t1 - t0;
+            if (t1 - t0 > s_st.apply_max) s_st.apply_max = t1 - t0;
+            s_st.rx++;
+        }
+        st_done();
+    }
+    cp_smooth_step((uint32_t)now, (uint32_t)dt, &s_hooks);
+    if (s_st_last_ms && now - s_st_last_ms > STALL_MS) {
+        if (g_avp_coop_banner == 0) {
+            fprintf(stderr, "[COOP] no state from the host for %llu ms\n", (unsigned long long)(now - s_st_last_ms));
+            InterlockedExchange(&g_avp_coop_banner, 2);
+        }
+    } else if (g_avp_coop_banner == 2) {
+        InterlockedExchange(&g_avp_coop_banner, 0);
+    }
+}
+
+static void state_log(ULONGLONG now)
+{
+    ULONGLONG dt;
+    if (!s_log_last) { s_log_last = now; return; }
+    dt = now - s_log_last;
+    if (dt < 5000) return;
+    s_log_last = now;
+    if (s_role == ROLE_HOST) {
+        uint32_t n = s_st.sent ? s_st.sent : 1;
+        fprintf(stderr, "[COOP] host: %.1f states/s (%u full, %u skipped), %.1f KB/s, per state %u objects %u records %u words, build avg %llu us max %llu us, truncated %u; orders in %ld run %ld rejected %ld\n",
+                s_st.sent * 1000.0 / (double)dt, s_st.full, s_st.skipped, s_tx_bytes / 1024.0 * 1000.0 / (double)dt,
+                s_st.objs / n, s_st.recs / n, s_st.words / n, (unsigned long long)(s_st.build_us / n),
+                (unsigned long long)s_st.build_max, s_st.trunc, s_ord_in, s_ord_exec, s_ord_rej);
+        s_tx_bytes = 0;
+    } else {
+        uint32_t n = s_st.rx ? s_st.rx : 1;
+        fprintf(stderr, "[COOP] guest: %.1f states/s (%u dropped), apply avg %llu us max %llu us; records %u exact %u nearby %u unmatched %u orphans %u killed %u bad %u; orders sent %ld\n",
+                s_st.rx * 1000.0 / (double)dt, s_st.rx_dropped, (unsigned long long)(s_st.apply_us / n),
+                (unsigned long long)s_st.apply_max, s_st.ap.records, s_st.ap.exact, s_st.ap.nearby, s_st.ap.unmatched,
+                s_st.ap.orphans, s_st.ap.kills, s_st.ap.bad, s_ord_sent);
+    }
+    memset(&s_st, 0, sizeof s_st);
 }
 
 void avp_coop_input_begin(void)
 {
-    uint32_t o = 0;
+    ULONGLONG now;
     launch_pump();
     s_local_input = 1;
-    if (!s_nrun) { rng_save(); return; }
-    s_executing = 1;
-    while (o + 8 <= s_nrun) {
-        uint32_t from_host, n;
-        const uint8_t *d;
-        memcpy(&from_host, s_run + o, 4);
-        memcpy(&n, s_run + o + 4, 4);
-        d = s_run + o + 8;
-        if (n >= 4) {
-            uint32_t kind;
-            memcpy(&kind, d, 4);
-            if (kind == CMD_ORDER && n >= 16) {
-                uint32_t route, h, len;
-                memcpy(&route, d + 4, 4);
-                memcpy(&h, d + 8, 4);
-                memcpy(&len, d + 12, 4);
-                if (len <= n - 16 && (route == 3 || owner_of(h) == (from_host ? 0 : 1)))
-                    avp_run_order((int)route, h, d + 16, len);
-            } else if (kind == CMD_GIVE && from_host && !s_vs && n >= 8) {
-                uint32_t cnt, i, given = 0;
-                memcpy(&cnt, d + 4, 4);
-                for (i = 0; i < cnt && 8 + 4 * (i + 1) <= n; i++) {
-                    uint32_t h;
-                    memcpy(&h, d + 8 + 4 * i, 4);
-                    if (owner_of(h) != 0) continue;
-                    run_deselect(0, h);
-                    s_owner_h[h >> 16] = h;
-                    s_owner[h >> 16] = 1;
-                    given++;
-                }
-                fprintf(stderr, "[COOP] %u unit%s given to player 2\n", given, given == 1 ? "" : "s");
-            } else if (kind == CMD_SELECT && n >= 8) {
-                uint32_t cnt, hs[SEL_MAX];
-                memcpy(&cnt, d + 4, 4);
-                if (cnt <= SEL_MAX && 8 + 4 * cnt <= n) {
-                    memcpy(hs, d + 8, 4 * cnt);
-                    run_select(from_host ? 0 : 1, hs, cnt);
-                }
-            } else if (kind == CMD_MOVE && n > 4) {
-                run_move(from_host ? 0 : 1, d + 4, n - 4);
-            } else if (kind == CMD_PCALL && n > 4) {
-                run_pcall(from_host ? 0 : 1, d + 4, n - 4);
-            } else if (kind == CMD_MARKER && n > 4) {
-                run_marker(from_host ? 0 : 1, d + 4, n - 4);
-            }
-        }
-        o += 8 + n;
-    }
-    s_nrun = 0;
-    s_executing = 0;
-    rng_save();
+    if (!coop_live()) return;
+    now = GetTickCount64();
+    kill_pump();
+    orders_exec();
+    if (s_role == ROLE_HOST) state_tick_host(now);
+    else state_tick_guest(now);
+    s_gt_last = now;
+    state_log(now);
 }
 
 void avp_coop_input_end(void)
 {
     s_local_input = 0;
-    rng_restore();
-    if (s_nsel_pending && coop_live()) {
-        uint32_t buf[2 + SEL_MAX];
-        buf[0] = CMD_SELECT;
-        buf[1] = (uint32_t)s_nsel_pending;
-        memcpy(buf + 2, s_sel_pending, 4u * (uint32_t)s_nsel_pending);
-        avp_coop_queue(buf, 8u + 4u * (uint32_t)s_nsel_pending);
-        fprintf(stderr, "[COOP] selection of %d unit%s sent\n", s_nsel_pending, s_nsel_pending == 1 ? "" : "s");
-    }
-    s_nsel_pending = 0;
+    if (coop_live()) sel_sync();
 }
-
-int avp_coop_take_route(int kind, uint32_t unit, uint32_t msg)
-{
-    uint32_t type, entry, size, h, pkt[4];
-    uint8_t buf[16 + ORDER_MAX];
-    if (!coop_live() || s_executing || !s_local_input || !unit || !msg) return 0;
-    h = G32(unit + 0x18);
-    {
-        static int told;
-        if (told++ < 20)
-            fprintf(stderr, "[COOP] local SendCommand type %08X unit %08X owner %d (we are %d)\n", G32(msg), h,
-                    owner_of(h), local_player());
-    }
-    if (kind != 1 || owner_of(h) != local_player()) return 1;
-    type = G32(msg);
-    entry = AVP_MSG_TYPES + (type & 0xFFu) * 12u;
-    if (!G32(entry)) {
-        static int told;
-        if (told++ < 5) fprintf(stderr, "[COOP] order type %08X has no size; runs here only\n", type);
-        return 0;
-    }
-    size = G32(entry + 4);
-    if (size == 0xFFFFFFFFu) size = G32(msg + 0xC) & 0xFFFFu;
-    if (size < 4 || size > ORDER_MAX) return 0;
-    pkt[0] = CMD_ORDER;
-    pkt[1] = (uint32_t)kind;
-    pkt[2] = h;
-    pkt[3] = size;
-    memcpy(buf, pkt, sizeof pkt);
-    {
-        uint32_t i;
-        for (i = 0; i < size; i++) buf[16 + i] = G8(msg + i);
-    }
-    if (!avp_coop_queue(buf, 16 + size)) return 0;
-    {
-        static int told;
-        if (told++ < 10) fprintf(stderr, "[COOP] order %08X route %d for %08X (%u bytes) sent\n", type, kind, h, size);
-    }
-    return 1;
-}
-
-int avp_coop_take_order(uint32_t unit, uint32_t msg)
-{
-    return avp_coop_take_route(1, unit, msg);
-}
-
-static int unit_handle(uint32_t v, uint32_t *out);
-
-static int sel_handle(uint32_t v, uint32_t *out)
-{
-    uint32_t o;
-    static int told;
-    if (v < 0x10000u || v >= 0x84000000u) return 0;
-    for (o = 4; o <= 0x60; o += 4) {
-        uint32_t f = G32(v + o);
-        if (f == v) continue;
-        if (unit_handle(f, out) && *out != G32(v + 0x18)) {
-            if (told++ < 2) fprintf(stderr, "[COOP] selection ring %08X: unit at +%02X\n", v, o);
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static int unit_handle(uint32_t v, uint32_t *out)
-{
-    uint32_t obj;
-    if (v >= 0x10000u && v < 0x84000000u && (G32(v + 0x18) >> 16) && G32(AVP_OBJ_TABLE + (G32(v + 0x18) >> 16) * 4u) == v) {
-        *out = G32(v + 0x18);
-        return 1;
-    }
-    obj = G32(AVP_OBJ_TABLE + (v >> 16) * 4u);
-    if ((v >> 16) && obj >= 0x10000u && obj < 0x84000000u && G32(obj + 0x18) == v) {
-        *out = v;
-        return 1;
-    }
-    return 0;
-}
-
-int avp_coop_give_selection(void)
-{
-    uint32_t ptr, sel, n, data, i, buf[2 + 64], cnt = 0;
-    if (!coop_live() || s_role != ROLE_HOST || s_vs) return 0;
-    ptr = G32(AVP_POINTER);
-    sel = ptr ? G32(ptr + 0x1B8) : 0;
-    if (!sel) return 0;
-    data = G32(sel);
-    n = G32(sel + 4);
-    {
-        static int told;
-        if (told++ < 2) {
-            fprintf(stderr, "[COOP] selection list %08X: %08X %08X %08X %08X\n", sel, G32(sel), G32(sel + 4),
-                    G32(sel + 8), G32(sel + 12));
-            for (i = 0; data && i < 3 && i < n; i++) {
-                uint32_t v = G32(data + i * 4u);
-                fprintf(stderr, "[COOP]   item %u: %08X -> %08X %08X %08X %08X %08X %08X %08X\n", i, v,
-                        v >= 0x10000u && v < 0x84000000u ? G32(v) : 0, v >= 0x10000u && v < 0x84000000u ? G32(v + 4) : 0,
-                        v >= 0x10000u && v < 0x84000000u ? G32(v + 8) : 0, v >= 0x10000u && v < 0x84000000u ? G32(v + 0xC) : 0,
-                        v >= 0x10000u && v < 0x84000000u ? G32(v + 0x10) : 0, v >= 0x10000u && v < 0x84000000u ? G32(v + 0x14) : 0,
-                        v >= 0x10000u && v < 0x84000000u ? G32(v + 0x18) : 0);
-            }
-        }
-    }
-    if (n > 64 || !data) return 0;
-    for (i = 0; i < n; i++) {
-        uint32_t h;
-        if (sel_handle(G32(data + i * 4u), &h) && owner_of(h) == 0)
-            buf[2 + cnt++] = h;
-    }
-    if (!cnt) return 0;
-    buf[0] = CMD_GIVE;
-    buf[1] = cnt;
-    avp_coop_queue(buf, 8 + cnt * 4);
-    fprintf(stderr, "[COOP] giving %u selected unit%s to player 2\n", cnt, cnt == 1 ? "" : "s");
-    return (int)cnt;
-}
-
-static void coop_turn(uint32_t turn)
-{
-    static uint32_t comp[TURN_RING][3];
-    uint64_t h = core_hash(), wh = world_hash();
-    ULONGLONG t0, last_note;
-    Turn *r, *l;
-    s_hashes[turn % TURN_RING] = h;
-    s_whashes[turn % TURN_RING] = wh;
-    comp[turn % TURN_RING][0] = G32(AVP_CLOCK);
-    comp[turn % TURN_RING][1] = G32(AVP_RNG_ACC);
-    comp[turn % TURN_RING][2] = G32(AVP_RNG_SEED);
-    send_turn(turn + TURN_DELAY, h, wh);
-    if (turn < TURN_DELAY) return;
-    t0 = last_note = GetTickCount64();
-    for (;;) {
-        int ok;
-        EnterCriticalSection(&s_lock);
-        r = &s_remote[turn % TURN_RING];
-        ok = r->have && r->turn == turn;
-        LeaveCriticalSection(&s_lock);
-        if (ok || s_coop_dead) break;
-        if (GetTickCount64() - t0 > wait_ms()) {
-            fprintf(stderr, "[COOP] waited for turn %u; slot holds turn %u have %d\n", turn, r->turn, r->have);
-            coop_fail("the other player stopped answering");
-            return;
-        }
-        if (GetTickCount64() - last_note > 10000) {
-            last_note = GetTickCount64();
-            fprintf(stderr, "[COOP] waiting %llu s for the other player's turn %u (slot holds turn %u have %d), sync tick %llu\n",
-                    (unsigned long long)((last_note - t0) / 1000u), turn, r->turn, r->have,
-                    (unsigned long long)(s_tick - s_mission_tick));
-        }
-        Sleep(1);
-    }
-    if (s_coop_dead) return;
-    l = &s_local[turn % TURN_RING];
-    if (r->hash != s_hashes[(turn - TURN_DELAY) % TURN_RING]) {
-        static int told;
-        if (told++ < 5) {
-            uint32_t *c = comp[(turn - TURN_DELAY) % TURN_RING];
-            fprintf(stderr, "[COOP] desync: turn %u, ours %016llX, theirs %016llX; our clock %08X rng %08X %08X\n",
-                    turn - TURN_DELAY, (unsigned long long)s_hashes[(turn - TURN_DELAY) % TURN_RING],
-                    (unsigned long long)r->hash, c[0], c[1], c[2]);
-        }
-    }
-    if (r->whash != s_whashes[(turn - TURN_DELAY) % TURN_RING]) {
-        static int told, total;
-        total++;
-        if (told < 20 || total % 100 == 0) {
-            told++;
-            fprintf(stderr, "[COOP] world mismatch #%d: turn %u (sync tick %llu), ours %016llX, theirs %016llX\n", total,
-                    turn - TURN_DELAY, (unsigned long long)(s_tick - s_mission_tick),
-                    (unsigned long long)s_whashes[(turn - TURN_DELAY) % TURN_RING], (unsigned long long)r->whash);
-            if (told == 1) net_dump("first world mismatch");
-        }
-    }
-    if (s_role == ROLE_HOST) { run_cmds(1, l); run_cmds(0, r); }
-    else { run_cmds(1, r); run_cmds(0, l); }
-    r->have = 0;
-}
-
-static void coop_tick(void)
-{
-    uint64_t t;
-    if (s_tick % 300u == 0)
-        fprintf(stderr, "[SYNC] heartbeat tick %llu clock %.3f real %llu ms\n",
-                (unsigned long long)s_tick, (double)GF(AVP_CLOCK), (unsigned long long)GetTickCount64());
-    if (!s_mission) return;
-    t = s_tick - s_mission_tick - 1;
-    if ((int64_t)t == s_dump_tick)
-        sync_report(1);
-    else if (s_log_every && t % (uint64_t)s_log_every == 0)
-        sync_report(0);
-    if (s_role != ROLE_NONE && !s_coop_dead && t % TURN_TICKS == 0)
-        coop_turn((uint32_t)(t / TURN_TICKS));
-}
-
-static uint32_t sync_page_count(void)
-{
-    uint32_t n = 0, r;
-    for (r = 0; r < sizeof k_sync_ranges / sizeof k_sync_ranges[0]; r++)
-        n += (k_sync_ranges[r][1] - k_sync_ranges[r][0]) / PAGE;
-    return n;
-}
-
-static uint32_t sync_page_addr(uint32_t i)
-{
-    uint32_t r;
-    for (r = 0; r < sizeof k_sync_ranges / sizeof k_sync_ranges[0]; r++) {
-        uint32_t n = (k_sync_ranges[r][1] - k_sync_ranges[r][0]) / PAGE;
-        if (i < n) return k_sync_ranges[r][0] + i * PAGE;
-        i -= n;
-    }
-    return 0;
-}
-
-static int sync_addr_ok(uint32_t a)
-{
-    uint32_t r;
-    if (a & (PAGE - 1u)) return 0;
-    for (r = 0; r < sizeof k_sync_ranges / sizeof k_sync_ranges[0]; r++)
-        if (a >= k_sync_ranges[r][0] && a < k_sync_ranges[r][1]) return 1;
-    return 0;
-}
-
-static uint8_t *guest_page(uint32_t a)
-{
-    return (uint8_t *)((uintptr_t)a + (uintptr_t)g_xbox_mem_offset);
-}
-
-static uint64_t page_hash(uint32_t a)
-{
-    return fnv(0xCBF29CE484222325ull, guest_page(a), PAGE);
-}
-
-static uint8_t *wait_bulk(int type, uint32_t *len)
-{
-    ULONGLONG t0 = GetTickCount64();
-    while (!s_bulk[type] && !s_coop_dead) {
-        if (GetTickCount64() - t0 > 60000) { coop_fail("state copy timed out"); return NULL; }
-        Sleep(2);
-    }
-    if (s_coop_dead) return NULL;
-    *len = s_bulk_len[type];
-    return s_bulk[type];
-}
-
-static void state_sync(void)
-{
-    uint32_t n = sync_page_count(), i, len;
-    lib_refresh();
-    if (s_role == ROLE_GUEST) {
-        uint64_t *hashes = (uint64_t *)malloc((size_t)n * 8u);
-        uint8_t *b;
-        uint32_t applied = 0, still = 0, o, kept = 0, np = 0, k, kept_lib = 0, kept_obj = 0;
-        if (!hashes) { coop_fail("memory"); return; }
-        for (i = 0; i < n; i++) hashes[i] = page_hash(sync_page_addr(i));
-        if (!send_msg(MSG_PAGEHASH, hashes, n * 8u)) { free(hashes); coop_fail("send hashes"); return; }
-        b = wait_bulk(MSG_PAGES, &len);
-        if (!b || len < 16) { free(hashes); return; }
-        memcpy(&s_vcount, b, 8);
-        memcpy(&applied, b + 8, 4);
-        memcpy(&np, b + 12, 4);
-        if (np > LIB_MAX || 16u + np * 8u > len) {
-            free(hashes);
-            free(b);
-            s_bulk[MSG_PAGES] = NULL;
-            coop_fail("state copy");
-            return;
-        }
-        for (k = 0; k < np; k++) {
-            uint32_t lo, sz;
-            memcpy(&lo, b + 16 + k * 8u, 4);
-            memcpy(&sz, b + 20 + k * 8u, 4);
-            s_lib_peer[k].lo = lo;
-            s_lib_peer[k].hi = lo + sz;
-        }
-        s_lib_peer_n = span_merge(s_lib_peer, np);
-        for (o = 16u + np * 8u, i = 0; i < applied && o + 4 + PAGE <= len; i++, o += 4 + PAGE) {
-            uint32_t a, w;
-            uint32_t *dst, src[PAGE / 4];
-            memcpy(&a, b + o, 4);
-            if (!sync_addr_ok(a)) { fprintf(stderr, "[COOP] state copy: bad page address %08X\n", a); coop_fail("state copy"); break; }
-            memcpy(src, b + o + 4, PAGE);
-            dst = (uint32_t *)guest_page(a);
-            for (w = 0; w < PAGE / 4; w++) {
-                uint32_t wa = a + w * 4u;
-                if (src[w] == dst[w]) continue;
-                if (lib_own_addr(wa) || span_has(s_lib_peer, s_lib_peer_n, wa)) {
-                    kept_lib++;
-                    continue;
-                }
-                if (span_has(s_lib_peer, s_lib_peer_n, src[w])) {
-                    kept_obj++;
-                    continue;
-                }
-                if (!(src[w] & 3u) && !(dst[w] & 3u)
-                    && src[w] >= LOCAL_LO && src[w] < LOCAL_HI && dst[w] >= LOCAL_LO && dst[w] < LOCAL_HI) {
-                    if (kept++ < 8)
-                        fprintf(stderr, "[COOP] kept local pointer at %08X: host %08X, here %08X\n",
-                                wa, src[w], dst[w]);
-                    continue;
-                }
-                dst[w] = src[w];
-            }
-        }
-        free(b);
-        s_bulk[MSG_PAGES] = NULL;
-        for (i = 0; i < n; i++) if (page_hash(sync_page_addr(i)) != hashes[i]) still++;
-        free(hashes);
-        fprintf(stderr, "[COOP] state copied from the host: %u pages (%u KB); %u pages changed; %u thread-local pointers kept\n",
-                applied, applied * 4u, still, kept);
-        fprintf(stderr, "[COOP] library state kept: %u own heap spans, %u on the host, %u words not copied, %u pointers to library objects kept\n",
-                s_lib_own_n, s_lib_peer_n, kept_lib, kept_obj);
-    } else {
-        uint8_t *b = wait_bulk(MSG_PAGEHASH, &len), *out;
-        uint32_t diff = 0, o, k;
-        if (!b) return;
-        if (len != n * 8u) { free(b); coop_fail("the other game has a different memory layout"); return; }
-        out = (uint8_t *)malloc(16u + LIB_MAX * 8u + (size_t)n * (4u + PAGE));
-        if (!out) { free(b); coop_fail("memory"); return; }
-        o = 16u + s_lib_own_n * 8u;
-        for (i = 0; i < n; i++) {
-            uint32_t a = sync_page_addr(i);
-            uint64_t theirs;
-            memcpy(&theirs, b + (size_t)i * 8u, 8);
-            if (page_hash(a) == theirs) continue;
-            memcpy(out + o, &a, 4);
-            memcpy(out + o + 4, guest_page(a), PAGE);
-            o += 4 + PAGE;
-            diff++;
-        }
-        free(b);
-        s_bulk[MSG_PAGEHASH] = NULL;
-        memcpy(out, &s_vcount, 8);
-        memcpy(out + 8, &diff, 4);
-        memcpy(out + 12, &s_lib_own_n, 4);
-        for (k = 0; k < s_lib_own_n; k++) {
-            uint32_t sz = s_lib_own[k].hi - s_lib_own[k].lo;
-            memcpy(out + 16 + k * 8u, &s_lib_own[k].lo, 4);
-            memcpy(out + 20 + k * 8u, &sz, 4);
-        }
-        if (!send_msg(MSG_PAGES, out, o)) coop_fail("send pages");
-        free(out);
-        fprintf(stderr, "[COOP] state sent to the guest: %u pages (%u KB), %u library heap spans\n", diff, diff * 4u, s_lib_own_n);
-    }
-}
-
-static char s_my_map[8];
 
 static void wait_peer_start(void)
 {
@@ -2102,21 +1937,24 @@ static void wait_peer_start(void)
         snprintf(s_my_map, sizeof s_my_map, "%s", m);
     }
     fprintf(stderr, "[COOP] mission ready, waiting for the other player\n");
+    InterlockedExchange(&g_avp_coop_banner, 1);
     while (!s_peer_started && !s_coop_dead) {
-        if (GetTickCount64() - t0 > 120000) { coop_fail("the other player never started"); return; }
+        if (GetTickCount64() - t0 > 120000) {
+            InterlockedExchange(&g_avp_coop_banner, 0);
+            coop_fail("the other player never started");
+            return;
+        }
         Sleep(5);
     }
+    InterlockedExchange(&g_avp_coop_banner, 0);
     if (!s_coop_dead && *s_my_map && *s_peer_map && strcmp(s_my_map, s_peer_map)) {
         char why[64];
         snprintf(why, sizeof why, "the games loaded different missions (%s and %s)", s_my_map, s_peer_map);
         coop_fail(why);
     }
-    if (!s_coop_dead && !getenv("AVP_NO_STATE_SYNC"))
-        state_sync();
+    if (!s_coop_dead) make_pointers();
     if (!s_coop_dead)
-        make_pointers();
-    if (!s_coop_dead)
-        fprintf(stderr, "[COOP] both players in, lockstep on\n");
+        fprintf(stderr, "[COOP] both players in, host-authoritative state stream on\n");
 }
 
 void avp_coop_mission_end(void)
@@ -2124,122 +1962,64 @@ void avp_coop_mission_end(void)
     if (!s_mission) { s_mission_seen = 0; s_launch_t = 0; }
 }
 
+static void tech_repair(void)
+{
+    uint32_t tt = G32(AVP_TECH_TREE), world = G32(AVP_WORLD), pm, species, row, h, n = 0, have = 0;
+    if (tt < 0x10000u || tt >= CP_LOCAL_HI - 0x1000u || world < 0x10000u || world >= CP_LOCAL_HI - 0x100u) return;
+    pm = G32(world + 0x78);
+    if (pm < 0x10000u || pm >= CP_LOCAL_HI - 0x520u) return;
+    species = G32(pm + 0x114);
+    for (row = tt + 0x38; n < 256 && G32(row); row += 8, n++)
+        if (G8(row + 7) == 1) have = 1;
+    if (have || !n) return;
+    for (h = 0; h < 0x10000u; h++) {
+        uint32_t obj = G32(AVP_OBJ_TABLE + h * 4u), arr, a[3];
+        if (!cp_obj_ok(obj) || G32(obj) != AVP_TECH_VT) continue;
+        arr = G32(obj + 0x34);
+        if (arr < 0x10000u || !(G32(obj + 0x21C) & species)) continue;
+        a[0] = tt;
+        a[1] = arr;
+        a[2] = 1;
+        avp_gcall(AVP_TECH_INIT, 0, a, 3, 0);
+        fprintf(stderr, "[COOP] player tech rows rebuilt from tree %08X (species %u)\n", obj, species);
+    }
+}
+
 void avp_coop_mission_start(void)
 {
-    const char *e;
+    ULONGLONG now;
     coop_init();
     s_mission_seen = 1;
-    if (!s_fixed || s_mission) return;
-    e = getenv("AVP_RNG_SEED");
-    if (e && *e) {
-        uint32_t v = (uint32_t)strtoul(e, NULL, 16);
-        G32(AVP_RNG_SEED) = v;
-        G32(AVP_RNG_ACC) = v ^ 0x5A5A5A5Au;
-    }
-    if (s_rng_saved) {
-        s_rng_save[0] = G32(AVP_RNG_ACC);
-        s_rng_save[1] = G32(AVP_RNG_SEED);
-    }
+    if (s_role == ROLE_NONE || s_mission) return;
+    state_cfg();
+    tech_repair();
+    cp_reset();
+    memset(&s_st, 0, sizeof s_st);
+    memset(s_owner, 0, sizeof s_owner);
+    memset(s_owner_h, 0, sizeof s_owner_h);
+    s_tx_seq = 0;
+    s_nsel_sent = 0;
+    EnterCriticalSection(&s_lock);
+    s_st_head = s_st_tail = 0;
+    s_ord_head = s_ord_tail = 0;
+    s_st_skip = 0;
+    LeaveCriticalSection(&s_lock);
     versus_init();
     wait_peer_start();
-    if (getenv("AVP_PAGE_DUMP")) {
-        uint32_t a;
-        for (a = 0; a < 0x04000000u; a += 0x1000u) {
-            const uint8_t *p = (const uint8_t *)((uintptr_t)a + (uintptr_t)g_xbox_mem_offset);
-            fprintf(stderr, "[PAGE] %08X %016llX\n", a, (unsigned long long)fnv(0xCBF29CE484222325ull, p, 0x1000u));
-        }
-    }
+    now = GetTickCount64();
+    s_st_last_ms = now;
+    s_gt_last = 0;
+    s_log_last = 0;
+    s_tx_last = 0;
+    s_tx_full_last = 0;
     s_mission = 1;
     s_launch_t = 0;
-    s_mission_tick = s_tick;
-    fprintf(stderr, "[SYNC] mission start at tick %llu\n", (unsigned long long)s_tick);
-    sync_report(0);
+    if (!s_coop_dead) tx_start();
+    if (s_role != ROLE_NONE)
+        fprintf(stderr, "[COOP] mission start as the %s: %d Hz state, full every %d ms\n",
+                s_role == ROLE_HOST ? "host" : "guest", s_hz, s_full_ms);
 }
 
-static uint64_t s_reads_since_tick;
-
-static int real_time_reader(uint32_t ret)
-{
-    return ret == 0x0012DFA6u || ret == 0x0012E03Au || ret == AVP_WAIT_START || ret == AVP_WAIT_POLL
-        || (ret >= 0x00066000u && ret < 0x0006C000u)
-        || (ret >= 0x0017C000u && ret < 0x0017D000u)
-        || (ret >= 0x001D6000u && ret < 0x001D7000u);
-}
-
-static struct { uint32_t ret, n; } s_stall[64];
-static int s_nstall, s_stall_told;
-static ULONGLONG s_tick_ms;
-
-static void stall_note(uint32_t ret)
-{
-    int i;
-    ULONGLONG now = GetTickCount64();
-    if (ret == AVP_TIMER_TICK) {
-        s_nstall = 0;
-        s_stall_told = 0;
-        s_tick_ms = now;
-        return;
-    }
-    for (i = 0; i < s_nstall && s_stall[i].ret != ret; i++) ;
-    if (i == s_nstall && s_nstall < 64) { s_stall[i].ret = ret; s_stall[i].n = 0; s_nstall++; }
-    if (i < 64) s_stall[i].n++;
-    if (!s_stall_told && s_tick_ms && now - s_tick_ms > 3000) {
-        s_stall_told = 1;
-        fprintf(stderr, "[SYNC] no tick for 3 s after tick %llu; counter reads since:\n", (unsigned long long)s_tick);
-        for (i = 0; i < s_nstall; i++)
-            fprintf(stderr, "[SYNC]   %08X x%u (thread %lu)\n", s_stall[i].ret, s_stall[i].n, GetCurrentThreadId());
-    }
-}
-
-uint64_t avp_coop_tsc(uint32_t esp, uint64_t real)
-{
-    uint32_t ret = G32(esp);
-    coop_init();
-    if (!s_fixed)
-        return real;
-    if (s_rebase) {
-        s_rebase = 0;
-        s_vcount = real;
-        s_real_at_tick = real;
-    }
-    if (!s_real_at_tick)
-        s_real_at_tick = real;
-    stall_note(ret);
-    if (s_mission && ret != AVP_TIMER_TICK) {
-        static struct { uint32_t ret, n; } seen[48];
-        static int nseen, dumped;
-        uint64_t t = s_tick - s_mission_tick - 1;
-        int i;
-        if (t <= 120) {
-            for (i = 0; i < nseen && seen[i].ret != ret; i++) ;
-            if (i == nseen && nseen < 48) { seen[i].ret = ret; seen[i].n = 0; nseen++; }
-            if (i < 48) seen[i].n++;
-        } else if (!dumped) {
-            dumped = 1;
-            for (i = 0; i < nseen; i++)
-                fprintf(stderr, "[TSCREAD] %08X x%u\n", seen[i].ret, seen[i].n);
-        }
-    }
-    if (ret < AVP_TIMER_LO || ret >= AVP_TIMER_HI || ret == AVP_WAIT_START || ret == AVP_WAIT_POLL) {
-        if (!s_mission || real_time_reader(ret))
-            return s_vcount + (real - s_real_at_tick);
-        s_reads_since_tick++;
-        return s_vcount + s_reads_since_tick * ((s_step ? s_step : 12222222u) / 64u);
-    }
-    if (!s_step) {
-        float scale = GF(AVP_CLOCK_SCALE);
-        if (scale > 0.0f)
-            s_step = (uint64_t)(1.0 / ((double)s_hz * (double)scale) + 0.5);
-    }
-    if (ret == AVP_TIMER_TICK) {
-        s_vcount += s_step ? s_step : 12222222u;
-        s_real_at_tick = real;
-        s_reads_since_tick = 0;
-        s_tick++;
-        coop_tick();
-    }
-    return s_vcount;
-}
 
 int avp_mission_count(void)
 {
