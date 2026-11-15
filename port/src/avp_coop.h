@@ -12,5 +12,6 @@ int avp_coop_self_ready(void);
 int avp_coop_set_ready(int on);
 const char *avp_coop_guest_mission(void);
 void avp_load_mission(int mission);
+void avp_coop_reset(void);
 
 #endif

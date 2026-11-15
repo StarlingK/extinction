@@ -2186,6 +2186,19 @@ static void coop_err(const char *m)
 
 static int s_co_race, s_co_scroll, s_co_pick = -1, s_co_list[64], s_co_n;
 
+static void coop_screen_reset(void)
+{
+    s_co_side = 0;
+    s_co_col = 0;
+    s_co_race = 0;
+    s_co_scroll = 0;
+    s_co_pick = -1;
+    s_co_n = 0;
+    s_join_logged = 0;
+    s_tf = TF_NONE;
+    *s_sk_err = 0;
+}
+
 static void coop_missions(void)
 {
     int i, n = avp_mission_count();
@@ -2210,7 +2223,7 @@ static void coop_host_toggle(void)
     tf_end();
     avp_skirmish_disarm();
     if (!avp_coop_host(mp_port()) && avp_coop_state() != 3)
-        coop_err("Restart the game to host or join after playing a mission");
+        coop_err("Could not start hosting or joining");
 }
 
 static void coop_join_toggle(void)
@@ -2223,7 +2236,7 @@ static void coop_join_toggle(void)
     avp_skirmish_disarm();
     s_join_logged = 0;
     if (!avp_coop_join(s_ip, mp_port()) && avp_coop_state() != 3)
-        coop_err("Restart the game to host or join after playing a mission");
+        coop_err("Could not start hosting or joining");
 }
 
 static void coop_start(void)
@@ -3494,6 +3507,7 @@ static void draw_hook(uint32_t *rgb, int w, int h)
     if (up != s_was_up) {
         column_reset();
         if (up) {
+            coop_screen_reset();
             xbox_InputKeysClear();
             if (!s_forced) { s_screen = SCR_MAIN; s_sel = s_sel_main; s_editing = 0; }
             fprintf(stderr, "[PCMENU] up (%s)\n", s_forced ? "forced" : "main menu");

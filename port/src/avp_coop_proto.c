@@ -292,6 +292,8 @@ static void sm_clear(void)
     s_sm_n = 0;
 }
 
+static uint32_t s_pend_n;
+
 void cp_reset(void)
 {
     uint32_t i;
@@ -307,6 +309,7 @@ void cp_reset(void)
     memset(s_orphan_h, 0, sizeof s_orphan_h);
     s_epoch = 0;
     s_tech_hash = 0;
+    s_pend_n = 0;
     sm_clear();
 }
 

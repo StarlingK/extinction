@@ -49,6 +49,7 @@ static int ioctlsocket(SOCKET s, long cmd, u_long *arg)
 
 extern ptrdiff_t g_xbox_mem_offset;
 static void tx_stop(void);
+static void coop_reset_all(void);
 static void coop_fail(const char *why);
 static int send_msg(uint32_t type, const void *body, uint32_t len);
 
@@ -96,10 +97,11 @@ enum { MSG_HELLO = 1, MSG_START = 2, MSG_CFG = 6, MSG_LAUNCH = 7, MSG_PICK = 8, 
 static int s_role;
 static void coop_start_net(void);
 static int s_mission_seen, s_mission, s_inited;
-static int s_peer_started, s_coop_dead;
+static int s_peer_started, s_coop_dead, s_env_skirm;
 static SOCKET s_sock = INVALID_SOCKET;
 static CRITICAL_SECTION s_lock;
 static CRITICAL_SECTION s_send_lock;
+static void lk_enter(void);
 static int s_send_lock_ready;
 volatile LONG g_avp_coop_banner;
 static HANDLE s_net_ready, s_cfg_ready, s_thread;
@@ -291,11 +293,18 @@ static void set_state(int st, const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(t, sizeof t, fmt, ap);
     va_end(ap);
-    EnterCriticalSection(&s_lock);
+    lk_enter();
     memcpy(s_text, t, sizeof s_text);
     s_state = st;
     LeaveCriticalSection(&s_lock);
 }
+static void lock_init(void);
+static void lk_enter(void)
+{
+    lock_init();
+    EnterCriticalSection(&s_lock);
+}
+
 static void lock_init(void)
 {
     if (s_lock_ready) return;
@@ -368,7 +377,7 @@ static void proto_fail(const char *what, uint32_t type, uint32_t len)
 
 static void close_listen(void)
 {
-    EnterCriticalSection(&s_lock);
+    lk_enter();
     if (s_listen != INVALID_SOCKET) {
         closesocket(s_listen);
         s_listen = INVALID_SOCKET;
@@ -393,6 +402,9 @@ static SOCKET try_connect(const struct sockaddr_in *a)
         FD_SET(c, &x);
         if (select((int)c + 1, NULL, &w, &x, &tv) > 0) {
             if (FD_ISSET(c, &w)) {
+                int soerr = 0;
+                socklen_t sl = sizeof soerr;
+                if (getsockopt(c, SOL_SOCKET, SO_ERROR, (char *)&soerr, &sl) || soerr) break;
                 nb = 0;
                 ioctlsocket(c, FIONBIO, &nb);
                 return c;
@@ -459,7 +471,7 @@ static DWORD WINAPI net_thread(LPVOID arg)
             SetEvent(s_net_ready);
             return 0;
         }
-        EnterCriticalSection(&s_lock);
+        lk_enter();
         s_listen = ls;
         LeaveCriticalSection(&s_lock);
         fprintf(stderr, "[COOP] hosting on port %d, waiting for the other player\n", port);
@@ -545,6 +557,7 @@ static DWORD WINAPI net_thread(LPVOID arg)
                 }
                 if (f && avp_skirmish_config_load(&c) && avp_skirmish_config_save(&c)) {
                     SetEnvironmentVariableA("AVP_SKIRMISH", "1");
+                    s_env_skirm = 1;
                     avp_skirmish_arm(0);
                     fprintf(stderr, "[COOP] received the host's skirmish config (%u bytes), map %s\n", hdr[1], c.map);
                 } else {
@@ -563,7 +576,7 @@ static DWORD WINAPI net_thread(LPVOID arg)
                 return 0;
             }
             peer.name[sizeof peer.name - 1] = 0;
-            EnterCriticalSection(&s_lock);
+            lk_enter();
             snprintf(s_peer_name, sizeof s_peer_name, "%s", *peer.name ? peer.name : "Player");
             LeaveCriticalSection(&s_lock);
             set_state(2, "Connected to %s", s_peer_name);
@@ -612,7 +625,7 @@ static DWORD WINAPI net_thread(LPVOID arg)
             uint8_t *dst;
             if (s_role != ROLE_GUEST || hdr[1] < CP_HDR || hdr[1] > CP_STATE_MAX) { proto_fail("state size", hdr[0], hdr[1]); return 0; }
             if (!s_st_scratch) s_st_scratch = (uint8_t *)malloc(CP_STATE_MAX);
-            EnterCriticalSection(&s_lock);
+            lk_enter();
             full = s_st_tail - s_st_head >= ST_RING;
             slot = s_st_tail % ST_RING;
             LeaveCriticalSection(&s_lock);
@@ -622,7 +635,7 @@ static DWORD WINAPI net_thread(LPVOID arg)
             if (!recv_all(dst, (int)hdr[1])) { coop_fail("state data"); return 0; }
             if (!cp_state_validate(dst, hdr[1])) { proto_fail("state contents", hdr[0], hdr[1]); return 0; }
             s_st_last_ms = GetTickCount64();
-            EnterCriticalSection(&s_lock);
+            lk_enter();
             if (full) {
                 memcpy(&s_st_dropseq, dst + 4, 4);
                 s_st_skip = 1;
@@ -637,7 +650,7 @@ static DWORD WINAPI net_thread(LPVOID arg)
             if (s_role != ROLE_HOST || hdr[1] < 4 || hdr[1] > CP_ORDER_WIRE_MAX) { proto_fail("order size", hdr[0], hdr[1]); return 0; }
             if (!recv_all(body, (int)hdr[1])) { coop_fail("order data"); return 0; }
             if (!cp_order_parse(body, hdr[1], &ord) || ord.cmd == CP_CMD_REINF) { proto_fail("order contents", hdr[0], hdr[1]); return 0; }
-            EnterCriticalSection(&s_lock);
+            lk_enter();
             if (s_ord_tail - s_ord_head < ORD_RING) {
                 ord.player = 1;
                 s_ord[s_ord_tail % ORD_RING] = ord;
@@ -658,7 +671,7 @@ static DWORD WINAPI net_thread(LPVOID arg)
             memcpy(&pl, body, 4);
             if (pl > 1u || !cp_order_parse(body + 4, hdr[1] - 4, &ord) || ord.cmd == CP_CMD_GIVE) { proto_fail("mirror contents", hdr[0], hdr[1]); return 0; }
             ord.player = pl;
-            EnterCriticalSection(&s_lock);
+            lk_enter();
             if (s_ord_tail - s_ord_head < ORD_RING) {
                 s_ord[s_ord_tail % ORD_RING] = ord;
                 s_ord_rawlen[s_ord_tail % ORD_RING] = 0;
@@ -676,13 +689,15 @@ static void net_begin(const char *spec, int role, int tries, const char *status)
 {
     lock_init();
     snprintf(s_spec, sizeof s_spec, "%s", spec);
-    EnterCriticalSection(&s_lock);
+    lk_enter();
     s_st_head = s_st_tail = 0;
     s_ord_head = s_ord_tail = 0;
     s_st_skip = 0;
     LeaveCriticalSection(&s_lock);
     s_coop_dead = 0;
     s_peer_started = 0;
+    s_peer_map[0] = 0;
+    s_my_map[0] = 0;
     s_cancel = 0;
     s_tries = tries;
     s_peer_name[0] = 0;
@@ -718,13 +733,15 @@ static void coop_start_net(void)
 
 static void net_stop(void)
 {
+    int i;
     if (s_sock != INVALID_SOCKET) fprintf(stderr, "[COOP] closing the connection on purpose (role %d, mission %d)\n", s_role, s_mission);
-    tx_stop();
     s_cancel = 1;
+    close_listen();
+    if (s_sock != INVALID_SOCKET) shutdown(s_sock, SD_BOTH);
+    tx_stop();
     if (s_thread) {
-        close_listen();
-        if (s_sock != INVALID_SOCKET) shutdown(s_sock, SD_BOTH);
-        WaitForSingleObject(s_thread, 5000);
+        for (i = 0; i < 100 && WaitForSingleObject(s_thread, 100) != WAIT_OBJECT_0; i++) {
+        }
         CloseHandle(s_thread);
         s_thread = NULL;
     }
@@ -732,10 +749,22 @@ static void net_stop(void)
         closesocket(s_sock);
         s_sock = INVALID_SOCKET;
     }
+    close_listen();
+    if (s_net_ready) {
+        CloseHandle(s_net_ready);
+        s_net_ready = NULL;
+    }
+    if (s_cfg_ready) {
+        CloseHandle(s_cfg_ready);
+        s_cfg_ready = NULL;
+    }
     s_role = ROLE_NONE;
     s_coop_dead = 0;
     s_launch_t = 0;
     s_peer_name[0] = 0;
+    s_peer_addr[0] = 0;
+    s_cfg_n = 0;
+    InterlockedExchange(&s_launch_req, -1);
     InterlockedExchange(&s_guest_mission, -1);
     InterlockedExchange(&s_host_pick, -1);
     InterlockedExchange(&s_peer_ready, 0);
@@ -744,12 +773,15 @@ static void net_stop(void)
     if (s_lock_ready) set_state(0, "");
 }
 
+extern volatile LONG g_avp_mainmenu;
+
 static int net_allowed(void)
 {
     coop_init();
     if (s_mission || s_mission_seen) {
+        if (g_avp_mainmenu) return 1;
         lock_init();
-        if (!s_mission) set_state(3, "Restart the game to host or join after playing a mission");
+        set_state(3, "Leave the current mission before hosting or joining");
         return 0;
     }
     return 1;
@@ -759,7 +791,7 @@ int avp_coop_host(int port)
 {
     char spec[32], status[64];
     if (!net_allowed()) return 0;
-    net_stop();
+    coop_reset_all();
     if (port < 1 || port > 65535) port = 27015;
     snprintf(spec, sizeof spec, "host:%d", port);
     if (!wsa_ensure()) return 0;
@@ -772,7 +804,7 @@ int avp_coop_join(const char *ip, int port)
 {
     char spec[160], status[160];
     if (!net_allowed()) return 0;
-    net_stop();
+    coop_reset_all();
     if (!ip || !*ip || strchr(ip, ':')) ip = "127.0.0.1";
     if (port < 1 || port > 65535) port = 27015;
     snprintf(spec, sizeof spec, "join:%.100s:%d", ip, port);
@@ -786,7 +818,7 @@ void avp_coop_cancel(void)
 {
     coop_init();
     if (s_mission || launch_busy()) return;
-    net_stop();
+    coop_reset_all();
 }
 
 int avp_coop_state(void)
@@ -798,7 +830,7 @@ const char *avp_coop_state_text(void)
 {
     static char t[sizeof s_text];
     if (!s_lock_ready) return "";
-    EnterCriticalSection(&s_lock);
+    lk_enter();
     memcpy(t, s_text, sizeof t);
     LeaveCriticalSection(&s_lock);
     return t;
@@ -1627,7 +1659,7 @@ static void exec_reinf(const CpOrder *o)
 static int ord_pop(CpOrder *o, uint8_t *raw, uint32_t *rawlen)
 {
     int ok = 0;
-    EnterCriticalSection(&s_lock);
+    lk_enter();
     if (s_ord_head != s_ord_tail) {
         uint32_t k = s_ord_head % ORD_RING;
         *o = s_ord[k];
@@ -1829,7 +1861,7 @@ static void state_tick_host(ULONGLONG now)
 static int st_pop(uint32_t *slot, uint32_t *len)
 {
     int ok = 0;
-    EnterCriticalSection(&s_lock);
+    lk_enter();
     if (s_st_head != s_st_tail) {
         *slot = s_st_head % ST_RING;
         *len = s_st_len[*slot];
@@ -1841,7 +1873,7 @@ static int st_pop(uint32_t *slot, uint32_t *len)
 
 static void st_done(void)
 {
-    EnterCriticalSection(&s_lock);
+    lk_enter();
     s_st_head++;
     LeaveCriticalSection(&s_lock);
 }
@@ -1957,9 +1989,82 @@ static void wait_peer_start(void)
         fprintf(stderr, "[COOP] both players in, host-authoritative state stream on\n");
 }
 
+static void coop_reset_all(void)
+{
+    uint32_t i;
+    net_stop();
+#ifdef _WIN32
+    if (s_wsa_ok) {
+        WSACleanup();
+        s_wsa_ok = 0;
+    }
+#endif
+    if (s_lock_ready) {
+        lk_enter();
+        s_st_head = s_st_tail = s_st_dropseq = 0;
+        s_ord_head = s_ord_tail = 0;
+        s_st_skip = 0;
+        LeaveCriticalSection(&s_lock);
+    }
+    s_ord_in = 0;
+    s_ord_drop = 0;
+    s_ord_sent = s_ord_exec = s_ord_rej = 0;
+    for (i = 0; i < ST_RING; i++) {
+        free(s_st_buf[i]);
+        s_st_buf[i] = NULL;
+        s_st_len[i] = 0;
+    }
+    free(s_st_scratch);
+    s_st_scratch = NULL;
+    free(s_sbuf);
+    s_sbuf = NULL;
+    s_st_last_ms = 0;
+    s_tx_quit = 0;
+    s_tx_pending = 0;
+    s_tx_len = s_tx_seq = 0;
+    s_tx_last = s_tx_full_last = s_gt_last = s_log_last = 0;
+    s_tx_bytes = s_tx_msgs = 0;
+    memset(&s_st, 0, sizeof s_st);
+    s_mission = 0;
+    s_mission_seen = 0;
+    s_peer_started = 0;
+    s_my_map[0] = 0;
+    s_local_input = s_executing = s_allow_death = 0;
+    s_kill_n = 0;
+    s_nsel_sent = 0;
+    s_last_net_err = 0;
+    s_netlog_n = 0;
+    memset(s_netlog, 0, sizeof s_netlog);
+    s_ptr[0] = s_ptr[1] = 0;
+    s_vs = 0;
+    s_vs_slot[0] = s_vs_slot[1] = 0;
+    memset(s_owner, 0, sizeof s_owner);
+    memset(s_owner_h, 0, sizeof s_owner_h);
+    memset(s_hide_h, 0, sizeof s_hide_h);
+    s_hide_head = 0;
+    s_scan[0] = 0;
+    InterlockedExchange(&g_avp_coop_banner, 0);
+    cp_reset();
+    avp_skirmish_disarm();
+    if (s_env_skirm) {
+        _putenv("AVP_SKIRMISH=");
+        s_env_skirm = 0;
+    }
+}
+
+void avp_coop_reset(void)
+{
+    coop_reset_all();
+}
+
 void avp_coop_mission_end(void)
 {
-    if (!s_mission) { s_mission_seen = 0; s_launch_t = 0; }
+    if (s_mission) {
+        coop_reset_all();
+        return;
+    }
+    s_mission_seen = 0;
+    s_launch_t = 0;
 }
 
 static void tech_repair(void)
@@ -1999,7 +2104,7 @@ void avp_coop_mission_start(void)
     memset(s_owner_h, 0, sizeof s_owner_h);
     s_tx_seq = 0;
     s_nsel_sent = 0;
-    EnterCriticalSection(&s_lock);
+    lk_enter();
     s_st_head = s_st_tail = 0;
     s_ord_head = s_ord_tail = 0;
     s_st_skip = 0;
@@ -2019,7 +2124,6 @@ void avp_coop_mission_start(void)
         fprintf(stderr, "[COOP] mission start as the %s: %d Hz state, full every %d ms\n",
                 s_role == ROLE_HOST ? "host" : "guest", s_hz, s_full_ms);
 }
-
 
 int avp_mission_count(void)
 {
