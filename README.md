@@ -27,7 +27,7 @@
 | `B` | Left stick click | Left thumb |
 | `N` | Right stick click | Right thumb |
 | `1` to `9` | Select a control group, if you press twice it will take you to them. |
-| `Ctrl` + `1` to `9` | Save units to control group 
+| `Ctrl` + `1` to `9` | Save units to control group |
 | `G` | Give units to player 2.|
 
 # Features:
