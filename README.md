@@ -10,6 +10,8 @@
 
 Map editor is coming along nicely and it's what will be used to create the skirmish maps. There is no official discord and there will not be. I do not know how you will share maps with each other.
 
+The oswoc with a radial circle is a spawner, map creators can place animal spawners including their limits since Aliens require hosts.
+
 <img width="980" height="719" alt="editor1" src="https://github.com/user-attachments/assets/275b49ba-d835-4cb1-8d3c-24d259fa8fcc" />
 
 
