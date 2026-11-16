@@ -18,7 +18,7 @@
 | `V` | Y button | Y |
 | `T` | White button | White |
 | `E` | Context action (Drone hives, hatch egg, etc.) | Black |
-| `Left Shift` (hold) | Alternate | Left trigger |
+| `Left Shift` (hold) | Alternate context actions | Left trigger |
 | `Tab` | Orders menu | Right trigger |
 | `Esc` or `Enter` | Pause | Start |
 | `Backspace` | Back | Back |
