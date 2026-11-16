@@ -6,16 +6,29 @@
 
  - This project should run natively, it has Direct3D rendering. Mouse and Keyboard support.
 
- - Controls:
-   Z or Left Click  select. 
-   X or Right Click order. / Shift Right Click attack move.
-   E for context ability, holding 1 shows alternate context.
-   Enter start.
-   Backspace back.
-   Q / E White and Black respectively.
-   1 / 3 Left, right trigger.
-   Arrows keys, D-pad.
-   Shift/Ctrl left and right stick click.
+ ### Controls
+
+| Key | Action |
+|---|---|
+| `W` `A` `S` `D` | Move the camera |
+| Mouse wheel | Zoom |
+| `Z` | Select / confirm | A |
+| `X` | Move / back | B |
+| `C` | X button | X |
+| `V` | Y button | Y |
+| `T` | White button | White |
+| `E` | Context action (Drone hives, hatch egg, etc.) | Black |
+| `Left Shift` (hold) | Alternate | Left trigger |
+| `Tab` | Orders menu | Right trigger |
+| `Esc` or `Enter` | Pause | Start |
+| `Backspace` | Back | Back |
+| Arrow keys | Menu navigation | D-pad |
+| `Numpad 8` `2` `4` `6` | Left stick up, down, left, right | Left stick |
+| `B` | Left stick click | Left thumb |
+| `N` | Right stick click | Right thumb |
+| `1` to `9` | Select a control group, if you press twice it will take you to them. |
+| `Ctrl` + `1` to `9` | Save units to control group 
+| `G` | Give the selected units to player 2.|
 
 # Features:
 
