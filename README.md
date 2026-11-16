@@ -26,9 +26,3 @@
 - 30/60/144 FPS. 
 
 
-# Planned:
-
-- Map-Editor(It's the setup for skirmish, versus.)
-- Figure out a way to read map from menu to do previews.
-- Workshop(Because of the way the folders are structured it's very easy to create a mod for this, this feature would allow people to create texture packs, etc, that are easily pluggable. I will not feel confident in this until i figure out a surefire way to prevent RCE on this as well, even if the chances are slim.)
-
