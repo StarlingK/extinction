@@ -39,6 +39,7 @@ extern void avp_coop_mission_start(void);
 extern void avp_coop_mission_end(void);
 extern void avp_skirmish_mission_start(void);
 extern void avp_skirmish_tick(void);
+extern void avp_skirmish_frame(void);
 extern void avp_skirmish_draw(uint32_t *rgb, int w, int h);
 extern void avp_skirmish_capture(const uint32_t *rgb, int w, int h);
 extern int avp_skirmish_armed(void);
@@ -863,10 +864,14 @@ static void ov_legacy(uint32_t *rgb, int w, int h)
     ov_ox = ov_oy = 0;
 }
 
+extern volatile int g_avp_guest_mapped;
+
 void avp_overlay_draw(uint32_t *rgb, int w, int h)
 {
     static ULONGLONG ptr_since;
     int hi = xbox_FramebufferLayerReady();
+    if (!g_avp_guest_mapped)
+        return;
     if (!s_in_mission || g_avp_pcmenu_up)
         ptr_since = 0;
     else if (!ptr_since)
@@ -892,6 +897,8 @@ void avp_overlay_layer(XboxFbLayer *L)
     static int pv[4];
     static uint32_t *ppx;
     int x0, y0, x1, y1, y;
+    if (!g_avp_guest_mapped)
+        return;
     if (L->full || L->px != ppx)
         pv[0] = pv[1] = pv[2] = pv[3] = 0;
     x0 = pv[0] < 0 ? 0 : pv[0]; y0 = pv[1] < 0 ? 0 : pv[1];
@@ -2031,6 +2038,98 @@ static void minimap_click(int fx, int fy)
     }
 }
 
+int avp_camera_pos(float *x, float *y)
+{
+    return camera_focus(x, y);
+}
+
+void avp_camera_jump(float x, float y)
+{
+    static const uint32_t vec[3] = { 0x10C, 0x40, 0x170 };
+    uint32_t cam = G32(AVP_CAMERA);
+    float dx, dy;
+    int i;
+    if (!cam || !(fabsf(x) < 1e7f) || !(fabsf(y) < 1e7f))
+        return;
+    camera_release(cam);
+    dx = x - GF(cam + 0x10C);
+    dy = y - GF(cam + 0x110);
+    for (i = 0; i < 3; i++) {
+        GF(cam + vec[i]) += dx;
+        GF(cam + vec[i] + 4) += dy;
+    }
+    s_goto = 0;
+}
+
+void avp_camera_zoom(float factor)
+{
+    static float base;
+    uint32_t cam = G32(AVP_CAMERA);
+    float len, nl, k;
+    if (!cam)
+        return;
+    len = sqrtf(GF(cam + 0x13C) * GF(cam + 0x13C) + GF(cam + 0x140) * GF(cam + 0x140) + GF(cam + 0x144) * GF(cam + 0x144));
+    if (!(len > 0.01f) || !(len < 1e6f))
+        return;
+    if (base <= 0.0f)
+        base = len;
+    nl = len * factor;
+    if (nl < base * 0.35f)
+        nl = base * 0.35f;
+    if (nl > base * 3.0f)
+        nl = base * 3.0f;
+    k = nl / len;
+    GF(cam + 0x13C) *= k;
+    GF(cam + 0x140) *= k;
+    GF(cam + 0x144) *= k;
+}
+
+float avp_camera_z(void)
+{
+    uint32_t cam = G32(AVP_CAMERA);
+    float z;
+    if (!cam)
+        return 0.0f;
+    z = GF(cam + 0x114);
+    return fabsf(z) < 1e5f ? z : 0.0f;
+}
+
+int avp_world_extent(float *w, float *h)
+{
+    uint32_t map = G32(AVP_MINIMAP);
+    float scale, mx, my;
+    if (map < 0x10000u || map >= 0x84000000u - 0x1000u)
+        return 0;
+    scale = GF(map + 0xF6C);
+    mx = GF(map + 0xF70);
+    my = GF(map + 0xF74);
+    if (!(scale > 0.0f) || !(mx > 0.0f) || !(my > 0.0f) || scale > 1e4f)
+        return 0;
+    *w = mx * scale;
+    *h = my * scale;
+    return 1;
+}
+
+int avp_world_rect(float *x0, float *y0, float *w, float *h)
+{
+    uint32_t map = G32(AVP_MINIMAP);
+    float scale, mx, my;
+    if (map < 0x10000u || map >= 0x84000000u - 0x1000u)
+        return 0;
+    scale = GF(map + 0xF6C);
+    mx = GF(map + 0xF70);
+    my = GF(map + 0xF74);
+    if (!(scale > 0.0f) || !(mx > 0.0f) || !(my > 0.0f) || scale > 1e4f)
+        return 0;
+    *x0 = -GF(map + 0xF80);
+    *y0 = -GF(map + 0xF84);
+    if (!(fabsf(*x0) < 1e6f) || !(fabsf(*y0) < 1e6f))
+        *x0 = *y0 = 0.0f;
+    *w = mx * scale;
+    *h = my * scale;
+    return 1;
+}
+
 #define AVP_BTN_RELEASE 0x00091180u
 #define RELEASE_UPDATES 6
 
@@ -2289,6 +2388,7 @@ static void avp_mouse_frame_body(uint32_t mgr)
     }
     find_cmds(mgr, mode, cmd);
     s_in_mission = cmd[C_PPOS].owner != 0;
+    avp_skirmish_frame();
     if (s_ncmds)
         cmd_script_run(mgr, mode, (uint32_t)(avp_coop_now_ms() - t0));
 

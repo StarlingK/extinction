@@ -420,7 +420,9 @@ static int ground_point(uint32_t ptr, float *x, float *y, float *z)
 int avp_editor_frame(int fx, int fy, int b, int wheel)
 {
     ULONGLONG now = GetTickCount64();
-    uint32_t ptr = G32(AVP_POINTER), world = G32(AVP_WORLD_OBJ);
+    uint32_t ptr, world;
+    ptr = G32(AVP_POINTER);
+    world = G32(AVP_WORLD_OBJ);
     float gx = 0, gy = 0, gz = 0;
     int have, down, inpanel, consumed = 0, i;
 

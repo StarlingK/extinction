@@ -483,22 +483,28 @@ function Invoke-Compile([string]$Xbe) {
     Write-Host 'configure'
     if ((Invoke-Native $cmake $cmakeArgs) -ne 0) { Fail 'cmake configure failed' }
     Write-Host 'build'
-    if ((Invoke-Native $cmake @('--build', $BuildDir, '-j', "$Jobs", '--target', 'extinction')) -ne 0) { Fail 'build failed' }
+    if ((Invoke-Native $cmake @('--build', $BuildDir, '-j', "$Jobs", '--target', 'extinction', 'extinction_mp', 'nostromo_editor')) -ne 0) { Fail 'build failed' }
 }
 
 function Publish-Exe {
-    $built = Join-Path $BuildDir 'extinction.exe'
-    if (-not (Test-Path -LiteralPath $built)) { Fail "not produced: $built" }
     New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
-    $final = Join-Path $DistDir 'AvPExtinction.exe'
-    Copy-Item -LiteralPath $built -Destination $final -Force
     $strip = Find-Command @('x86_64-w64-mingw32-strip', 'strip', 'llvm-strip')
-    if ($strip) {
-        Write-Host 'strip'
-        if ((Invoke-Native (Get-Command $strip).Source @($final)) -ne 0) { Write-Host 'warn: strip failed' }
+    $pairs = @(@('extinction.exe', 'AvPExtinction.exe'), @('AvPExtinctionMP.exe', 'AvPExtinctionMP.exe'))
+    foreach ($p in $pairs) {
+        $built = Join-Path $BuildDir $p[0]
+        if (-not (Test-Path -LiteralPath $built)) { Fail "not produced: $built" }
+        $final = Join-Path $DistDir $p[1]
+        Copy-Item -LiteralPath $built -Destination $final -Force
+        if ($strip) {
+            if ((Invoke-Native (Get-Command $strip).Source @($final)) -ne 0) { Write-Host 'warn: strip failed' }
+        }
+        Write-Host "ok: $final"
+        Write-Host "sha256 $(Get-Sha $final)"
     }
-    Write-Host "ok: $final"
-    Write-Host "sha256 $(Get-Sha $final)"
+    $mapsOut = Join-Path $DistDir 'maps'
+    New-Item -ItemType Directory -Force -Path $mapsOut | Out-Null
+    Copy-Item -Path (Join-Path (Join-Path (Join-Path $Root 'port') 'maps') '*.nmap') -Destination $mapsOut -Force
+    Copy-Item -Path (Join-Path (Join-Path (Join-Path $Root 'port') 'maps') '*.nterr') -Destination $mapsOut -Force
 }
 
 function Invoke-Build {

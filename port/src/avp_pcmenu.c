@@ -9,6 +9,18 @@
 #include "avp_layout.h"
 #include "avp_skirmish.h"
 #include "avp_editor.h"
+#include "avp_nmap.h"
+#include "avp_coop.h"
+#ifndef _WIN32
+#include <sys/types.h>
+#include <sys/wait.h>
+#endif
+
+#if defined(AVP_MP_MODE)
+#define APP_MODE 1
+#else
+#define APP_MODE 0
+#endif
 #include "avp_layer.h"
 #include "avp_steam.h"
 #ifndef _WIN32
@@ -1320,13 +1332,13 @@ static void main_plate(const Box *b, const char *label, int hot)
 }
 
 enum { SCR_MAIN, SCR_MP, SCR_SKIRM, SCR_SETTINGS, SCR_QUIT, SCR_KEYS,
-       SCR_EDITOR, SCR_HOST, SCR_JOIN, SCR_COOP, SCR_COOPMODE };
+       SCR_EDITOR, SCR_HOST, SCR_JOIN, SCR_COOP, SCR_COOPMODE, SCR_SKCUST, SCR_NEDOPEN, SCR_EDLAUNCH };
 
 typedef struct { const char *label; int game; int screen; const char *tag; int vis; } MainItem;
 static const MainItem k_main[] = {
     { "Campaign",       0, -1, NULL, 1 },
-    { "Co-op Campaign", -1, SCR_COOPMODE, NULL, 1 },
-    { "Multiplayer",    -1, SCR_MP, NULL, 0 },
+    { "Co-op",           -1, SCR_COOPMODE, NULL, 1 },
+    { "Versus",         -1, SCR_MP, NULL, 0 },
     { "Skirmish vs AI", -1, SCR_SKIRM, NULL, 0 },
     { "Map Editor",     -1, SCR_EDITOR, NULL, 0 },
     { "Load Game",      1, -1, NULL, 1 },
@@ -1337,7 +1349,22 @@ static const MainItem k_main[] = {
     { "Extras",         5, -1, NULL, 1 },
     { "Quit",           -1, SCR_QUIT, NULL, 1 },
 };
-#define N_MAIN_ALL ((int)(sizeof k_main / sizeof k_main[0]))
+static const MainItem k_main_mp[] = {
+    { "Skirmish",        -1, SCR_SKCUST, NULL, 1 },
+    { "PC Settings",     -1, SCR_SETTINGS, NULL, 1 },
+    { "Nostromo Editor", -1, SCR_EDLAUNCH, NULL, 1 },
+    { "Quit",            -1, SCR_QUIT, NULL, 1 },
+};
+static const MainItem *main_tab(int *n)
+{
+#if APP_MODE == 1
+    *n = (int)(sizeof k_main_mp / sizeof k_main_mp[0]);
+    return k_main_mp;
+#else
+    *n = (int)(sizeof k_main / sizeof k_main[0]);
+    return k_main;
+#endif
+}
 #define MAIN_X0 402
 #define MAIN_X1 598
 #define MAIN_Y0 140
@@ -1347,17 +1374,19 @@ static const MainItem k_main[] = {
 
 static const MainItem *main_item(int i)
 {
-    int k;
-    for (k = 0; k < N_MAIN_ALL; k++)
-        if (k_main[k].vis && i-- == 0) return &k_main[k];
-    return &k_main[0];
+    int k, na;
+    const MainItem *t = main_tab(&na);
+    for (k = 0; k < na; k++)
+        if (t[k].vis && i-- == 0) return &t[k];
+    return &t[0];
 }
 
 static int main_count(void)
 {
-    int k, n = 0;
-    for (k = 0; k < N_MAIN_ALL; k++)
-        n += k_main[k].vis;
+    int k, na, n = 0;
+    const MainItem *t = main_tab(&na);
+    for (k = 0; k < na; k++)
+        n += t[k].vis;
     return n;
 }
 
@@ -1383,7 +1412,7 @@ static DWORD s_handoff_t;
 static int s_mx = -1, s_my = -1;
 static int s_was_up;
 
-static Box s_box[24];
+static Box s_box[48];
 static int s_nbox;
 
 #define KB_VIS 7
@@ -1784,6 +1813,55 @@ static void layout_editor(void)
     s_box[s_nbox++] = bk;
 }
 
+#define KS_ROWS 6
+#define KS_FOLDER 6
+#define KS_SLOT0 7
+#define KS_MAXSLOT 8
+#define KS_HOST (KS_SLOT0 + KS_MAXSLOT * 3)
+#define KS_JOIN (KS_HOST + 1)
+#define KS_START (KS_HOST + 2)
+#define KS_BACK (KS_HOST + 3)
+
+static int ks_nslots(void);
+
+static void layout_skcust(void)
+{
+    int i, n = ks_nslots();
+    Box b, z = { 0, 0, 0, 0 };
+    s_nbox = 0;
+    for (i = 0; i < KS_ROWS; i++) {
+        b.x0 = 40; b.y0 = 108 + i * 22; b.x1 = 250; b.y1 = 108 + i * 22 + 20;
+        s_box[s_nbox++] = b;
+    }
+    b.x0 = 40; b.y0 = 244; b.x1 = 250; b.y1 = 266;
+    s_box[s_nbox++] = b;
+    for (i = 0; i < KS_MAXSLOT; i++) {
+        int y = 104 + i * 29;
+        b.y0 = y; b.y1 = y + 25;
+        b.x0 = 296; b.x1 = 376; s_box[s_nbox++] = i < n ? b : z;
+        b.x0 = 380; b.x1 = 480; s_box[s_nbox++] = i < n ? b : z;
+        b.x0 = 484; b.x1 = 560; s_box[s_nbox++] = i < n ? b : z;
+    }
+    b.y0 = 412; b.y1 = 436;
+    b.x0 = 40; b.x1 = 150; s_box[s_nbox++] = b;
+    b.x0 = 156; b.x1 = 266; s_box[s_nbox++] = b;
+    b.x0 = 272; b.x1 = 382; s_box[s_nbox++] = b;
+    b.x0 = 388; b.x1 = 480; s_box[s_nbox++] = b;
+}
+
+static void layout_nedopen(void)
+{
+    int i;
+    Box b;
+    s_nbox = 0;
+    for (i = 0; i < KS_ROWS; i++) {
+        b.x0 = 90; b.y0 = 160 + i * 24; b.x1 = 400; b.y1 = b.y0 + 22;
+        s_box[s_nbox++] = b;
+    }
+    b.x0 = 90; b.y0 = 376; b.x1 = 230; b.y1 = 402; s_box[s_nbox++] = b;
+    b.x0 = 242; b.x1 = 360; s_box[s_nbox++] = b;
+}
+
 static void layout_quit(void)
 {
     Box yes = { 214, 262, 314, 288 }, no = { 326, 262, 426, 288 };
@@ -1805,6 +1883,8 @@ static void layout(void)
     case SCR_JOIN: layout_join(); break;
     case SCR_SKIRM: layout_skirm(); break;
     case SCR_EDITOR: layout_editor(); break;
+    case SCR_SKCUST: layout_skcust(); break;
+    case SCR_NEDOPEN: layout_nedopen(); break;
     case SCR_QUIT: layout_quit(); break;
     }
 }
@@ -2011,15 +2091,41 @@ static void sk_start(void)
     handoff_campaign();
 }
 
+static void level_handoff(void)
+{
+    s_forced = 0;
+    s_handoff = 1;
+    s_handoff_t = GetTickCount();
+    go(SCR_MAIN);
+}
+
+static int nmap_exists(const char *name)
+{
+    char path[96];
+    FILE *f;
+    snprintf(path, sizeof path, "maps/%s.nmap", name);
+    f = fopen(path, "rb");
+    if (f) fclose(f);
+    return f != NULL;
+}
+
+static void launch_editor_exe(const char *map);
+
+static void ned_launch(const char *base, const char *name)
+{
+    (void)base;
+    launch_editor_exe(name);
+}
+
 static void ed_start(void)
 {
-    AvpSkirmishCfg c;
-    memset(&c, 0, sizeof c);
-    snprintf(c.map, sizeof c.map, "%s", k_codes[s_sk_map]);
-    if (!avp_skirmish_config_save(&c)) { sk_fail(); return; }
-    avp_skirmish_arm(1);
-    fprintf(stderr, "[PCMENU] map editor on %s\n", c.map);
-    handoff_campaign();
+    char name[NMAP_NAME];
+    int i;
+    for (i = 1; i < 1000; i++) {
+        snprintf(name, sizeof name, i == 1 ? "Untitled" : "Untitled_%d", i);
+        if (!nmap_exists(name)) break;
+    }
+    ned_launch(k_codes[s_sk_map], name);
 }
 
 static void sk_move(int dx, int dy)
@@ -2433,6 +2539,266 @@ static void ed_activate(int i)
     else back();
 }
 
+static char s_nm_names[64][NMAP_NAME];
+static int s_nm_n, s_nm_pick, s_nm_scroll, s_sk_net;
+static int s_ks_kind[KS_MAXSLOT] = { 1, 2, 2, 2, 3, 3, 3, 3 };
+static int s_ks_race[KS_MAXSLOT] = { AVP_RACE_MARINE, AVP_RACE_ALIEN, AVP_RACE_ALIEN, AVP_RACE_PREDATOR, AVP_RACE_ALIEN, AVP_RACE_ALIEN, AVP_RACE_ALIEN, AVP_RACE_ALIEN };
+static int s_ks_team[KS_MAXSLOT] = { 1, 1, 2, 2, 3, 3, 4, 4 };
+static const char *const k_ks_kind[4] = { "Open", "Human", "AI", "Closed" };
+
+static int sk_peer(void)
+{
+    return avp_coop_role() == 1 && avp_coop_state() == 2;
+}
+
+static char s_ks_base[4], s_ks_loaded[NMAP_NAME];
+static int s_ks_objs, s_ks_spawns, s_ks_n = 2, s_ks_num[KS_MAXSLOT];
+
+static void ks_refresh(void)
+{
+    s_nm_n = nmap_list(s_nm_names, 64);
+    if (s_nm_pick >= s_nm_n) s_nm_pick = s_nm_n ? s_nm_n - 1 : 0;
+    s_ks_loaded[0] = 0;
+}
+
+static void ks_info(void)
+{
+    Nmap *m;
+    int i;
+    const char *cur = s_nm_n > 0 ? s_nm_names[s_nm_pick] : "";
+    if (!strcmp(cur, s_ks_loaded)) return;
+    snprintf(s_ks_loaded, sizeof s_ks_loaded, "%s", cur);
+    s_ks_base[0] = 0;
+    s_ks_objs = s_ks_spawns = 0;
+    s_ks_n = 2;
+    memset(s_ks_num, 0, sizeof s_ks_num);
+    if (!*cur || !(m = malloc(sizeof *m))) return;
+    if (nmap_load(m, cur) >= 0) {
+        snprintf(s_ks_base, sizeof s_ks_base, "%s", m->base);
+        s_ks_objs = m->nobj;
+        s_ks_spawns = nmap_start_list(m, s_ks_num);
+        s_ks_n = s_ks_spawns < 2 ? 2 : s_ks_spawns;
+        for (i = 0; i < s_ks_n && i < KS_MAXSLOT; i++) {
+            int n = s_ks_num[i];
+            if (n < 1 || n > NMAP_MAX_SPAWN || !m->slot[n - 1].used) continue;
+            if (m->slot[n - 1].race >= 0 && m->slot[n - 1].race < AVP_RACE_COUNT) s_ks_race[i] = m->slot[n - 1].race;
+            if (m->slot[n - 1].team > 0 && m->slot[n - 1].team <= s_ks_n) s_ks_team[i] = m->slot[n - 1].team;
+        }
+    }
+    free(m);
+}
+
+static int ks_nslots(void)
+{
+    ks_info();
+    return s_ks_n;
+}
+
+static void ks_cycle_slot(int i, int col)
+{
+    if (avp_coop_role() == 2) return;
+    if (col == 1) {
+        s_ks_race[i] = (s_ks_race[i] + 1) % AVP_RACE_COUNT;
+        return;
+    }
+    if (col == 2) {
+        s_ks_team[i] = s_ks_team[i] % ks_nslots() + 1;
+        return;
+    }
+    if (i == 0) return;
+    s_ks_kind[i] = (s_ks_kind[i] + 1) % 4;
+}
+
+static int ks_build(AvpSkirmishCfg *c, char *err, size_t en)
+{
+    Nmap *m = malloc(sizeof *m);
+    int i, n = 0, peer = sk_peer(), used_remote = 0, teams[KS_MAXSLOT + 1] = { 0 }, nteams = 0, ns = ks_nslots();
+    if (!m) return 0;
+    memset(c, 0, sizeof *c);
+    if (s_nm_n <= 0) { snprintf(err, en, "No custom map selected"); free(m); return 0; }
+    if (nmap_load(m, s_nm_names[s_nm_pick]) < 0) {
+        snprintf(err, en, "Could not read the map"); free(m); return 0;
+    }
+    snprintf(c->nmap, sizeof c->nmap, "%s", s_nm_names[s_nm_pick]);
+    for (i = 0; i < ns; i++) {
+        AvpSkirmishPlayer *p;
+        int k = s_ks_kind[i], race = s_ks_race[i];
+        if (k == 3) continue;
+        if (k == 0 || (k == 1 && i > 0)) {
+            if (!peer || used_remote) {
+                if (k == 1) { snprintf(err, en, "Slot %d needs a player: host and wait, or set AI", i + 1); free(m); return 0; }
+                continue;
+            }
+            used_remote = 1;
+            k = 4;
+        }
+        if (i >= s_ks_spawns) { snprintf(err, en, "The map has only %d Player Starts", s_ks_spawns); free(m); return 0; }
+        p = &c->player[n++];
+        p->slot = i + 1;
+        p->kind = k == 4 ? AVP_PK_REMOTE : k == 2 ? AVP_PK_AI : AVP_PK_HUMAN;
+        p->race = (AvpRace)race;
+        p->spawn = s_ks_num[i];
+        p->team = s_ks_team[i];
+        if (!teams[s_ks_team[i]]) { teams[s_ks_team[i]] = 1; nteams++; }
+    }
+    c->nplayers = n;
+    avp_skirmish_pick_code(c);
+    free(m);
+    if (nteams < 2) { snprintf(err, en, "At least two teams are needed"); return 0; }
+    return 1;
+}
+
+static void launch_editor_exe(const char *map)
+{
+#ifdef _WIN32
+    char path[MAX_PATH + 32], cmdline[128], *sl;
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    DWORD n = GetModuleFileNameA(NULL, path, MAX_PATH);
+    if (!n || n >= MAX_PATH) { coop_err("Could not locate the editor"); return; }
+    sl = strrchr(path, '\\');
+    if (!sl) { coop_err("Could not locate the editor"); return; }
+    strcpy(sl + 1, "NostromoEditor.exe");
+    snprintf(cmdline, sizeof cmdline, "NostromoEditor.exe%s%s", map ? " --open " : "", map ? map : "");
+    memset(&si, 0, sizeof si);
+    si.cb = sizeof si;
+    if (!CreateProcessA(path, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+        coop_err("NostromoEditor.exe was not found next to this program");
+        return;
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    settings_save();
+    PostMessageA(s_hwnd, WM_CLOSE, 0, 0);
+#else
+    char path[600], *sl;
+    ssize_t n = readlink("/proc/self/exe", path, sizeof path - 24);
+    pid_t pid;
+    if (n <= 0) { coop_err("Could not locate the editor"); return; }
+    path[n] = 0;
+    sl = strrchr(path, '/');
+    if (!sl) { coop_err("Could not locate the editor"); return; }
+    strcpy(sl + 1, "NostromoEditor");
+    if (access(path, X_OK) != 0) { coop_err("NostromoEditor was not found next to this program"); return; }
+    pid = fork();
+    if (pid == 0) {
+        if (map) execl(path, path, "--open", map, (char *)NULL);
+        else execl(path, path, (char *)NULL);
+        _exit(1);
+    }
+    if (pid < 0) { coop_err("Could not start the editor"); return; }
+    settings_save();
+    {
+        SDL_Event q;
+        memset(&q, 0, sizeof q);
+        q.type = SDL_QUIT;
+        SDL_PushEvent(&q);
+    }
+#endif
+}
+
+static void nedopen_activate(int i)
+{
+    sound(2);
+    if (i < KS_ROWS) {
+        if (s_nm_scroll + i < s_nm_n) s_nm_pick = s_nm_scroll + i;
+    } else if (i == KS_ROWS) {
+        Nmap *m;
+        if (s_nm_n <= 0) return;
+        m = malloc(sizeof *m);
+        if (!m) return;
+        if (nmap_load(m, s_nm_names[s_nm_pick]) < 0 || strlen(m->base) != 3)
+            coop_err("Could not read the map");
+        else
+            ned_launch(m->base, s_nm_names[s_nm_pick]);
+        free(m);
+    } else {
+        back();
+    }
+}
+
+static void boot_requests(void)
+{
+    static int done;
+    const char *tm;
+    if (done || !g_avp_mainmenu) return;
+    tm = getenv("AVP_TEST_MAP");
+    if (!(tm && *tm)) { done = 1; return; }
+    done = 1;
+    if (tm && *tm) {
+        Nmap *m = malloc(sizeof *m);
+        AvpSkirmishCfg c;
+        int i, a = -1, b = -1, k = 0;
+        if (m && nmap_load(m, tm) >= 0) {
+            AvpRace own = m->base[0] == 'A' ? AVP_RACE_ALIEN : m->base[0] == 'P' ? AVP_RACE_PREDATOR : AVP_RACE_MARINE;
+            memset(&c, 0, sizeof c);
+            snprintf(c.nmap, sizeof c.nmap, "%s", tm);
+            for (i = 0; i < 2; i++) if (m->spawn[i].used && a < 0) a = i;
+            for (i = 2; i < 4; i++) if (m->spawn[i].used && b < 0) b = i;
+            if (a < 0) for (i = 0; i < NMAP_MAX_SPAWN && a < 0; i++) if (m->spawn[i].used && i != b) a = i;
+            if (b < 0) for (i = NMAP_MAX_SPAWN - 1; i >= 0 && b < 0; i--) if (m->spawn[i].used && i != a) b = i;
+            if (a >= 0) {
+                c.player[k].slot = 1; c.player[k].kind = AVP_PK_HUMAN; c.player[k].race = own;
+                c.player[k].spawn = a + 1; c.player[k].team = 1; k++;
+            }
+            if (b >= 0) {
+                c.player[k].slot = 3; c.player[k].kind = AVP_PK_AI;
+                c.player[k].race = own == AVP_RACE_ALIEN ? AVP_RACE_MARINE : AVP_RACE_ALIEN;
+                c.player[k].spawn = b + 1; c.player[k].team = 2; k++;
+            }
+            c.nplayers = k;
+            avp_skirmish_pick_code(&c);
+            if (k == 2 && avp_skirmish_config_save(&c)) {
+                avp_skirmish_arm(0);
+                avp_load_level_code(c.map);
+                level_handoff();
+            }
+        }
+        free(m);
+        return;
+    }
+}
+
+static void ks_start(void)
+{
+    AvpSkirmishCfg c;
+    char err[96];
+    if (avp_coop_role() == 2) return;
+    if (!ks_build(&c, err, sizeof err)) { coop_err(err); return; }
+    if (!avp_skirmish_config_save(&c)) { sk_fail(); return; }
+    avp_skirmish_arm(0);
+    if (sk_peer() && !avp_coop_send_cfg()) {
+        coop_err("Lost the connection to the other player");
+        avp_skirmish_disarm();
+        return;
+    }
+    fprintf(stderr, "[PCMENU] custom skirmish %s on %s with %d players\n", c.nmap, c.map, c.nplayers);
+    avp_load_level_code(c.map);
+    level_handoff();
+}
+
+static void ks_activate(int i)
+{
+    sound(2);
+    if (i < KS_ROWS) {
+        if (s_nm_scroll + i < s_nm_n) s_nm_pick = s_nm_scroll + i;
+    } else if (i == KS_FOLDER) {
+        nmap_open_folder();
+    } else if (i < KS_HOST) {
+        ks_cycle_slot((i - KS_SLOT0) / 3, (i - KS_SLOT0) % 3 == 0 ? 0 : (i - KS_SLOT0) % 3);
+    } else if (i == KS_HOST || i == KS_JOIN) {
+        avp_coop_cancel();
+        s_sk_net = 1;
+        s_coop_from = SCR_SKCUST;
+        s_mode = 0;
+        go(SCR_COOPMODE);
+    } else if (i == KS_START) {
+        ks_start();
+    } else {
+        back();
+    }
+}
+
 static void mp_status(int x0, int y0, int x1, int y1)
 {
     int st = avp_coop_state();
@@ -2682,6 +3048,7 @@ static void steam_tick(void)
     if (!g_avp_mainmenu || !avp_steam_take_join(&l)) return;
     s_co_steam = 1;
     s_coop_from = SCR_MAIN;
+    s_sk_net = APP_MODE == 1;
     avp_skirmish_disarm();
     go(SCR_COOP);
     s_co_side = 2;
@@ -2693,13 +3060,14 @@ static void steam_tick(void)
 static void draw_screen(void)
 {
     steam_tick();
+    boot_requests();
     char buf[64];
     int i;
     column_update();
     if (!s_col_lock && s_screen == SCR_MAIN && g_avp_mainmenu && !s_forced) return;
     if (s_screen != SCR_MAIN) {
-        if (!s_set.original_menu && g_avp_mainmenu) {
-            Box keep[24];
+        if ((APP_MODE != 0 || !s_set.original_menu) && g_avp_mainmenu) {
+            Box keep[48];
             int kn = s_nbox;
             memcpy(keep, s_box, sizeof keep);
             layout_main();
@@ -2876,7 +3244,7 @@ static void draw_screen(void)
         text(270, s_box[0].y0, 288, s_box[0].y1, ">", s_sel == 0 ? C_EDGE_HOT : C_EDGE_DIM, F_BTN,
              DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
         map_preview(390, 160, s_sk_map);
-        text(90, 204, 370, 300, "Edit opens the campaign menu and loads the chosen map in the editor.",
+        text(90, 204, 370, 300, "Pick the level whose terrain the new map uses. Its mission units and scripts are removed.",
              C_TXT, F_BODY, DT_LEFT | DT_WORDBREAK);
         if (*s_sk_err) {
             if (GetTickCount() - s_sk_err_t < 3000)
@@ -2884,8 +3252,92 @@ static void draw_screen(void)
             else
                 *s_sk_err = 0;
         }
-        button(s_box[1].x0, s_box[1].y0, s_box[1].x1, s_box[1].y1, "Edit", s_sel == 1, 0, NULL);
+        button(s_box[1].x0, s_box[1].y0, s_box[1].x1, s_box[1].y1, "Create", s_sel == 1, 0, NULL);
         button(s_box[2].x0, s_box[2].y0, s_box[2].x1, s_box[2].y1, "Back", s_sel == 2, 0, NULL);
+        break;
+    }
+
+    case SCR_SKCUST: {
+        int k, role = avp_coop_role(), st = avp_coop_state();
+        if (role == 2 && st == 2 && avp_skirmish_armed()) {
+            AvpSkirmishCfg gc;
+            if (avp_skirmish_config_load(&gc)) { avp_skirmish_pick_code(&gc); if (strlen(gc.map) == 3) avp_load_level_code(gc.map); }
+            level_handoff();
+            break;
+        }
+        panel(20, 30, 620, 450);
+        text(40, 38, 600, 70, "Skirmish", C_TXT_HOT, F_TITLE, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        rrect(40, 72, 600, 74, 1, C_EDGE_DIM, C_EDGE_DIM, 1, 0, 0);
+        text(40, 80, 250, 102, "Custom maps", C_GOLD, F_BODY, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        for (k = 0; k < KS_ROWS; k++) {
+            const Box *b = &s_box[k];
+            int m = s_nm_scroll + k;
+            if (m >= s_nm_n) break;
+            button(b->x0, b->y0, b->x1, b->y1, s_nm_names[m], s_sel == k, 0, m == s_nm_pick ? "*" : NULL);
+        }
+        if (!s_nm_n)
+            text(40, 108, 250, 200, "No custom maps yet. Make one in the Nostromo Editor and save it in the maps folder.",
+                 C_TXT_OFF, F_BODY, DT_LEFT | DT_WORDBREAK);
+        button(s_box[KS_FOLDER].x0, s_box[KS_FOLDER].y0, s_box[KS_FOLDER].x1, s_box[KS_FOLDER].y1,
+               "Open maps folder", s_sel == KS_FOLDER, 0, NULL);
+        ks_info();
+        text(262, 80, 600, 100, "Players and teams", C_GOLD, F_BODY, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        for (k = 0; k < ks_nslots(); k++) {
+            char nb[24];
+            const Box *kb = &s_box[KS_SLOT0 + k * 3], *rb = &s_box[KS_SLOT0 + k * 3 + 1], *tb = &s_box[KS_SLOT0 + k * 3 + 2];
+            snprintf(nb, sizeof nb, "%d", k + 1);
+            text(262, kb->y0, 292, kb->y1, nb, C_TXT, F_BODY, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            button(kb->x0, kb->y0, kb->x1, kb->y1, k_ks_kind[s_ks_kind[k]], s_sel == KS_SLOT0 + k * 3, k == 0 || role == 2, NULL);
+            button(rb->x0, rb->y0, rb->x1, rb->y1, k_race_name[s_ks_race[k]], s_sel == KS_SLOT0 + k * 3 + 1,
+                   role == 2, NULL);
+            snprintf(nb, sizeof nb, "Team %d", s_ks_team[k]);
+            button(tb->x0, tb->y0, tb->x1, tb->y1, nb, s_sel == KS_SLOT0 + k * 3 + 2, role == 2, NULL);
+        }
+        if (s_nm_n > 0) {
+            char ib[200];
+            snprintf(ib, sizeof ib, "%d objects, %d Player Starts. Any slot can be any race; player 1's race decides the HUD and menus. Players on the same team are allies.",
+                     s_ks_objs, s_ks_spawns);
+            text(40, 274, 250, 400, ib, C_GOLD, F_BODY, DT_LEFT | DT_WORDBREAK);
+        }
+        text(262, 352, 600, 396, "Open and Human slots take the player who joins (one remote human: host and one guest). AI slots run the game's own AI.",
+             C_TXT_OFF, F_BODY, DT_LEFT | DT_WORDBREAK);
+        mp_status(262, 330, 600, 350);
+        if (role == 2)
+            text(484, 80, 600, 100, "Host decides", C_TXT_OFF, F_BODY, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        button(s_box[KS_HOST].x0, s_box[KS_HOST].y0, s_box[KS_HOST].x1, s_box[KS_HOST].y1, "Host", s_sel == KS_HOST, 0, NULL);
+        button(s_box[KS_JOIN].x0, s_box[KS_JOIN].y0, s_box[KS_JOIN].x1, s_box[KS_JOIN].y1, "Join", s_sel == KS_JOIN, 0, NULL);
+        button(s_box[KS_START].x0, s_box[KS_START].y0, s_box[KS_START].x1, s_box[KS_START].y1, "Start", s_sel == KS_START, role == 2, NULL);
+        button(s_box[KS_BACK].x0, s_box[KS_BACK].y0, s_box[KS_BACK].x1, s_box[KS_BACK].y1, "Back", s_sel == KS_BACK, 0, NULL);
+        if (*s_sk_err) {
+            if (GetTickCount() - s_sk_err_t < 5000)
+                text(40, 440, 600, 460, s_sk_err, 0xFF6060u, F_BODY, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            else
+                *s_sk_err = 0;
+        }
+        break;
+    }
+
+    case SCR_NEDOPEN: {
+        int k;
+        panel(70, 100, 590, 420);
+        text(90, 110, 570, 144, "Open Map", C_TXT_HOT, F_TITLE, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        rrect(90, 146, 570, 148, 1, C_EDGE_DIM, C_EDGE_DIM, 1, 0, 0);
+        for (k = 0; k < KS_ROWS; k++) {
+            const Box *b = &s_box[k];
+            int m = s_nm_scroll + k;
+            if (m >= s_nm_n) break;
+            button(b->x0, b->y0, b->x1, b->y1, s_nm_names[m], s_sel == k, 0, m == s_nm_pick ? "*" : NULL);
+        }
+        if (!s_nm_n)
+            text(90, 160, 400, 240, "No maps in the maps folder yet.", C_TXT_OFF, F_BODY, DT_LEFT | DT_WORDBREAK);
+        button(s_box[KS_ROWS].x0, s_box[KS_ROWS].y0, s_box[KS_ROWS].x1, s_box[KS_ROWS].y1, "Open", s_sel == KS_ROWS, s_nm_n <= 0, NULL);
+        button(s_box[KS_ROWS + 1].x0, s_box[KS_ROWS + 1].y0, s_box[KS_ROWS + 1].x1, s_box[KS_ROWS + 1].y1, "Back", s_sel == KS_ROWS + 1, 0, NULL);
+        if (*s_sk_err) {
+            if (GetTickCount() - s_sk_err_t < 4000)
+                text(90, 340, 570, 362, s_sk_err, 0xFF6060u, F_BODY, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            else
+                *s_sk_err = 0;
+        }
         break;
     }
 
@@ -2901,6 +3353,7 @@ static void draw_screen(void)
 
     case SCR_COOP: {
         const Box *hp = &s_box[0], *ht = &s_box[1];
+        if (s_sk_net && avp_coop_state() == 2) { go(SCR_SKCUST); break; }
         if (s_co_steam) { draw_coop_steam(); break; }
         const Box *ja = &s_box[CO_ADDR], *jp = &s_box[CO_JPORT], *jt = &s_box[CO_JOIN];
         int st = avp_coop_state(), role = avp_coop_role(), k, any = 0;
@@ -3086,7 +3539,7 @@ static int visible(void)
             s_handoff = 0;
         return 0;
     }
-    if (s_set.original_menu && s_screen == SCR_MAIN)
+    if (APP_MODE == 0 && s_set.original_menu && s_screen == SCR_MAIN)
         return 0;
     if (g_avp_mainmenu) {
         s_gone_t = 0;
@@ -3131,6 +3584,7 @@ static void go(int screen)
         if (!*s_ip) sscanf(s_set.recent[0], "%63[^: ]", s_ip);
     }
     if (screen == SCR_EDITOR) *s_sk_err = 0;
+    if (screen == SCR_SKCUST || screen == SCR_NEDOPEN) { ks_refresh(); *s_sk_err = 0; s_sel = 0; }
     if (screen == SCR_COOP) {
         if (avp_coop_state() == 3) avp_coop_cancel();
         s_co_side = avp_coop_role();
@@ -3175,9 +3629,12 @@ static void back(void)
         go(SCR_COOPMODE);
         return;
     }
+    if (s_screen == SCR_SKCUST) { avp_coop_cancel(); s_sk_net = 0; go(SCR_MAIN); return; }
     if (s_screen == SCR_COOPMODE) {
         avp_coop_cancel();
-        if (s_coop_from == SCR_SETTINGS) {
+        if (s_coop_from == SCR_SKCUST) {
+            go(SCR_SKCUST);
+        } else if (s_coop_from == SCR_SETTINGS) {
             go(SCR_SETTINGS);
             s_sel = ST_COOP;
         } else {
@@ -3294,13 +3751,19 @@ static void activate(int i)
             s_handoff_t = GetTickCount();
         } else {
             fprintf(stderr, "[PCMENU] %s\n", it->label);
-            if (it->screen == SCR_MP || it->screen == SCR_COOPMODE)
+            if (it->screen == SCR_MP || it->screen == SCR_COOPMODE || it->screen == SCR_SKCUST)
                 avp_skirmish_disarm();
-            if (it->screen == SCR_COOPMODE)
+            if (it->screen == SCR_COOPMODE) {
                 s_coop_from = SCR_MAIN;
-            go(it->screen);
+                s_sk_net = 0;
+            }
+            if (it->screen == SCR_SKCUST) s_sk_net = 0;
+            if (it->screen == SCR_EDLAUNCH) launch_editor_exe(NULL);
+            else go(it->screen);
         }
         break;
+    case SCR_SKCUST: ks_activate(i); break;
+    case SCR_NEDOPEN: nedopen_activate(i); break;
     case SCR_MP:
         sound(2);
         if (i == 4) back();
@@ -3362,6 +3825,15 @@ static int box_at(int x, int y)
 
 static int disabled(int i)
 {
+    if (s_screen == SCR_NEDOPEN) return i < KS_ROWS ? s_nm_scroll + i >= s_nm_n : i == KS_ROWS && s_nm_n <= 0;
+    if (s_screen == SCR_SKCUST) {
+        if (i < KS_ROWS) return s_nm_scroll + i >= s_nm_n;
+        if (i >= KS_SLOT0 && i < KS_HOST) {
+            int sl = (i - KS_SLOT0) / 3, c = (i - KS_SLOT0) % 3;
+            return sl >= ks_nslots() || avp_coop_role() == 2 || (sl == 0 && c == 0);
+        }
+        return i == KS_START && avp_coop_role() == 2;
+    }
     if (s_screen == SCR_JOIN) return (i == 3 && !join_go()) || (i > 3 && i < 7 && !*s_set.recent[i - 4]);
     if (s_screen == SCR_HOST) return i == (s_mode ? 2 + SK_START : 2) && avp_coop_state() != 2;
     if (s_screen == SCR_COOP && s_co_steam && (i < 2 || i >= CO_ADDR)) {
@@ -3681,6 +4153,35 @@ static int input_hook(HWND h, UINT m, WPARAM w, LPARAM l)
     return 1;
 }
 
+void avp_ui_panel(int x0, int y0, int x1, int y1) { panel(x0, y0, x1, y1); }
+void avp_ui_card(int x0, int y0, int x1, int y1) { card(x0, y0, x1, y1); }
+void avp_ui_cell(int x0, int y0, int x1, int y1, int hot, int off) { cell(x0, y0, x1, y1, hot, off); }
+void avp_ui_button(int x0, int y0, int x1, int y1, const char *label, int hot, int off, const char *tag)
+{
+    button(x0, y0, x1, y1, label, hot, off, tag);
+}
+void avp_ui_rect(int x0, int y0, int x1, int y1, uint32_t rgb, float alpha)
+{
+    rrect(x0, y0, x1, y1, 0, rgb, rgb, alpha, 0, 0);
+}
+void avp_ui_frame(int x0, int y0, int x1, int y1, uint32_t rgb)
+{
+    rrect(x0, y0, x1, y1, 0, rgb, rgb, 0.0f, rgb, 1.2f);
+}
+void avp_ui_line(int x0, int y0, int x1, int y1, uint32_t rgb)
+{
+    rrect(x0, y0, x1, y1, 0, rgb, rgb, 1.0f, 0, 0);
+}
+void avp_ui_text(int x0, int y0, int x1, int y1, const char *str, uint32_t rgb, int small, int align)
+{
+    text(x0, y0, x1, y1, str, rgb, small ? F_BODY : F_BTN,
+         (align == 1 ? DT_CENTER : align == 2 ? DT_RIGHT : DT_LEFT) | DT_VCENTER | DT_SINGLELINE);
+}
+void avp_ui_title(int x0, int y0, int x1, int y1, const char *str, uint32_t rgb)
+{
+    text(x0, y0, x1, y1, str, rgb, F_TITLE, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+}
+
 extern void avp_overlay_draw(uint32_t *rgb, int w, int h);
 static int s_menu_off;
 static int s_up_now;
@@ -3828,7 +4329,7 @@ static void layer_hook(XboxFbLayer *L)
 
 int avp_pcmenu_hides_game(void)
 {
-    return g_avp_mainmenu && !s_menu_off && !s_set.original_menu;
+    return g_avp_mainmenu && !s_menu_off && (APP_MODE != 0 || !s_set.original_menu);
 }
 
 void avp_pcmenu_init(void)

@@ -660,6 +660,7 @@ static int rename_path(const char *from, const char *to)
 }
 
 extern int avp_steam_unpack(const char *gamedir);
+extern void avp_tools_unpack(void);
 
 static int run_setup(const char *base)
 {
@@ -810,6 +811,7 @@ int avp_setup_locate(char *base, size_t n)
             snprintf(base, n, "%s", cand[i]);
             change_dir(base);
             fprintf(stderr, "[SETUP] game files in %s" AVP_SEP "game\n", base);
+            avp_tools_unpack();
             return 1;
         }
         if (r == 0 && mismatch < 0) mismatch = i;
@@ -835,6 +837,7 @@ int avp_setup_locate(char *base, size_t n)
         return 0;
     }
     change_dir(base);
+    avp_tools_unpack();
     return 1;
 }
 

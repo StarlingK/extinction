@@ -28,6 +28,21 @@ static const char *const k_env[][2] = {
     { "RECOMP_GPU", "1" },
 };
 
+void avp_launcher_env(void)
+{
+    char exe[MAX_PATH], *slash, kv[160];
+    size_t i;
+    for (i = 0; i < sizeof k_env / sizeof k_env[0]; i++) {
+        if (getenv(k_env[i][0])) continue;
+        snprintf(kv, sizeof kv, "%s=%s", k_env[i][0], k_env[i][1]);
+        _putenv(kv);
+    }
+    if (GetModuleFileNameA(NULL, exe, sizeof exe) > 0 && (slash = strrchr(exe, '\\')) != NULL) {
+        *slash = 0;
+        SetCurrentDirectoryA(exe);
+    }
+}
+
 static int game_exe(char *out, size_t n)
 {
     DWORD k = GetModuleFileNameA(NULL, out, (DWORD)n);

@@ -1,0 +1,60 @@
+nmap 1
+base M01
+bounds 230 230
+terrain 230 230
+spawn 1 80.5 32.2 0 1.5708
+spawn 2 149.5 32.2 0 1.5708
+spawn 3 80.5 197.8 0 -1.5708
+spawn 4 149.5 197.8 0 -1.5708
+wildlife GRynth 115 62 0 4 60 14
+wildlife GRynth 115 168 0 4 60 14
+atmos 46 115 0 0
+atmos 184 115 0 0
+object @JoshTree2 neutral 122.27 87.81 0 -2.7758
+object @JoshTree2 neutral 116.49 21.39 0 -0.4167
+object @JoshTree2 neutral 27.95 32.15 0 -0.4740
+object @JoshTree2 neutral 181.15 38.85 0 -1.7381
+object @JoshTree2 neutral 211.39 23.23 0 2.2512
+object @JoshTree2 neutral 37.65 76.25 0 1.9853
+object @JoshTree2 neutral 143.11 89.17 0 0.2998
+object @JoshTree2 neutral 55.48 151.52 0 -0.4547
+object @JoshTree2 neutral 77.37 132.32 0 -0.2940
+object @JoshTree2 neutral 155.27 63.2 0 0.4674
+object @JoshTree2 neutral 120.11 190.92 0 1.4409
+object @JoshTree2 neutral 77.3 154.54 0 0.5926
+object @JoshTree2 neutral 131.17 106.15 0 2.1350
+object @JoshTree2 neutral 155.78 144.78 0 3.0966
+object @Cactus1 neutral 180.16 71.39 0 -0.7172
+object @Cactus1 neutral 107.25 47.82 0 -2.4046
+object @Cactus1 neutral 25.74 169.28 0 -2.3277
+object @Cactus1 neutral 190.19 30.11 0 -0.3191
+object @Cactus1 neutral 179.63 188.67 0 -1.3915
+object @Cactus1 neutral 97.86 86.41 0 2.4127
+object @Cactus1 neutral 207.64 44.34 0 -2.0334
+object @Cactus1 neutral 60.74 61.02 0 -0.0944
+object @Desertbush01 neutral 133.03 66.98 0 -3.1143
+object @Desertbush01 neutral 153.55 118.13 0 0.7385
+object @Desertbush01 neutral 195.87 171.67 0 2.3519
+object @Desertbush01 neutral 27.44 56.05 0 -2.1207
+object @Desertbush01 neutral 13.85 44.41 0 -2.5028
+object @Desertbush01 neutral 43.86 64.86 0 -0.9584
+object @Desertbush01 neutral 185.63 214.8 0 -0.2136
+object @Desertbush01 neutral 46.48 18.47 0 2.8322
+object @GenericRock01 neutral 120.73 43.47 0 0.2711
+object @GenericRock01 neutral 211.85 188.53 0 1.2321
+object @GenericRock01 neutral 66.65 88.02 0 -2.0910
+object @GenericRock01 neutral 171.49 80.52 0 -1.7393
+object @GenericRock01 neutral 179.42 163.55 0 -1.7161
+object @GenericRock01 neutral 19.67 19.46 0 -1.3853
+object @GenericRock02 neutral 203.46 213.78 0 2.8574
+object @GenericRock02 neutral 196.03 183.91 0 -0.1289
+object @GenericRock02 neutral 30.96 147.5 0 2.5734
+object @GenericRock02 neutral 205.44 160.49 0 -2.0724
+object @GenericRock02 neutral 39.51 44.39 0 2.5425
+object @GenericRock02 neutral 16.67 210.31 0 0.9400
+object @Crate01 neutral 181.01 56.51 0 -1.5585
+object @Crate01 neutral 73.09 62.49 0 0.5428
+object @Crate01 neutral 40.32 197.98 0 -0.9182
+object @Militarycrate01 neutral 106.54 131.86 0 2.5390
+object @Militarycrate01 neutral 115.34 121.44 0 0.1476
+object @Militarycrate01 neutral 17.59 102.88 0 -1.9901

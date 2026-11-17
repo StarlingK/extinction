@@ -100,9 +100,8 @@ extern const char *avp_player_name(void);
 #define AVP_TECH_VT      0x0022E184u
 #define SHELL_PTR        0x002F67F0u
 #define SHELL_FLAGS      0x210u
-#define UNIT_PLAYER      0x474u
 #define SEL_MAX          64
-#define CFG_MAX          2048u
+#define CFG_MAX          2097152u
 #define MISSIONS         21
 
 enum { ROLE_NONE, ROLE_HOST, ROLE_GUEST };
@@ -220,7 +219,7 @@ typedef struct {
 } Hello;
 
 extern const char *avp_player_name(void);
-#define CFG_MAX 2048u
+#define CFG_MAX 2097152u
 #define SHELL_PTR 0x002F67F0u
 #define MISSIONS 21
 
@@ -565,14 +564,14 @@ static SOCKET try_connect(const struct sockaddr_in *a)
 
 static int send_cfg(void)
 {
-    char cfg[CFG_MAX];
+    char *cfg = malloc(CFG_MAX);
     uint32_t n = 0;
-    FILE *f = avp_skirmish_armed() || avp_skirmish_active() ? fopen("skirmish.cfg", "rb") : NULL;
-    if (f) {
-        n = (uint32_t)fread(cfg, 1, sizeof cfg, f);
-        fclose(f);
-    }
-    if (!send_msg(MSG_CFG, cfg, n)) return 0;
+    int ok;
+    if (!cfg) return 0;
+    if (avp_skirmish_armed() || avp_skirmish_active()) n = (uint32_t)avp_skirmish_pack(cfg, CFG_MAX);
+    ok = send_msg(MSG_CFG, cfg, n);
+    free(cfg);
+    if (!ok) return 0;
     fprintf(stderr, "[COOP] sent the skirmish config (%u bytes)\n", n);
     return 1;
 }
@@ -747,16 +746,11 @@ link_up:
         if (!recv_all(hdr, sizeof hdr)) { if (s_tr == TR_STEAM && *avp_steam_error()) coop_fail_text(avp_steam_error(), "%s", avp_steam_error()); else coop_fail("closed"); return 0; }
         net_note(1, hdr[0], hdr[1]);
         if (hdr[0] == MSG_CFG) {
-            char cfg[CFG_MAX];
-            if (hdr[1] > sizeof cfg || (hdr[1] && !recv_all(cfg, (int)hdr[1]))) { coop_fail("cfg"); return 0; }
+            char *cfg = hdr[1] <= CFG_MAX ? malloc(CFG_MAX) : NULL;
+            if (!cfg || (hdr[1] && !recv_all(cfg, (int)hdr[1]))) { free(cfg); coop_fail("cfg"); return 0; }
             if (hdr[1]) {
-                FILE *f = fopen("skirmish.cfg", "wb");
                 AvpSkirmishCfg c;
-                if (f) {
-                    fwrite(cfg, 1, hdr[1], f);
-                    fclose(f);
-                }
-                if (f && avp_skirmish_config_load(&c) && avp_skirmish_config_save(&c)) {
+                if (avp_skirmish_unpack(cfg, hdr[1]) && avp_skirmish_config_load(&c) && avp_skirmish_config_save(&c)) {
                     SetEnvironmentVariableA("AVP_SKIRMISH", "1");
                     s_env_skirm = 1;
                     avp_skirmish_arm(0);
@@ -765,6 +759,7 @@ link_up:
                     fprintf(stderr, "[COOP] could not apply the host's skirmish config\n");
                 }
             }
+            free(cfg);
             s_cfg_n++;
             SetEvent(s_cfg_ready);
             continue;
@@ -1175,8 +1170,8 @@ static void versus_init(void)
     }
     if (h < 0 || g < 0) return;
     s_vs = 1;
-    s_vs_slot[0] = h;
-    s_vs_slot[1] = g;
+    s_vs_slot[0] = avp_skirmish_game_slot(h);
+    s_vs_slot[1] = avp_skirmish_game_slot(g);
     fprintf(stderr, "[COOP] versus: host plays slot %d, guest plays slot %d\n", h, g);
 }
 
@@ -1188,7 +1183,7 @@ static int owner_of(uint32_t handle)
         int slot;
         obj = cp_obj_of(handle);
         if (!obj) return -1;
-        slot = (int)G32(obj + UNIT_PLAYER);
+        slot = (int)(G32(obj + 0x18) & 0xFFFFu);
         return slot == s_vs_slot[0] ? 0 : slot == s_vs_slot[1] ? 1 : -1;
     }
     return s_owner_h[i] == handle ? s_owner[i] : 0;
@@ -1403,17 +1398,33 @@ static int level_is_mission(uint32_t sh)
         && G8(sh + 2) >= '0' && G8(sh + 2) <= '9' && c3 == '/';
 }
 
-static void launch_apply(int mission)
+#define LAUNCH_CODE 1000
+static char s_launch_code[4];
+
+static void launch_apply_code(const char *code, int keep_skirmish)
 {
     uint32_t sh = shell_state(), a[1], i;
     char name[40];
     a[0] = AVP_LEVEL_RECORD;
     avp_gcall(AVP_LEVEL_RESET, 0, a, 1, 0);
-    avp_skirmish_disarm();
-    snprintf(name, sizeof name, "%s/background.tbd", k_missions[mission].code);
+    if (!keep_skirmish) avp_skirmish_disarm();
+    snprintf(name, sizeof name, "%s/background.tbd", code);
     for (i = 0; i <= strlen(name); i++) G8(sh + i) = (uint8_t)name[i];
     G32(sh + SHELL_FLAGS) |= 1u;
-    fprintf(stderr, "[COOP] loading mission %s (\"%s\")\n", k_missions[mission].code, name);
+    fprintf(stderr, "[COOP] loading level %s (\"%s\")\n", code, name);
+}
+
+static void launch_apply(int mission)
+{
+    launch_apply_code(k_missions[mission].code, 0);
+}
+
+void avp_load_level_code(const char *code)
+{
+    if (!code || strlen(code) != 3) return;
+    memcpy(s_launch_code, code, 3);
+    s_launch_code[3] = 0;
+    InterlockedExchange(&s_launch_req, LAUNCH_CODE);
 }
 
 static void auto_drive(void)
@@ -1440,11 +1451,15 @@ static void launch_pump(void)
     LONG m = s_launch_req;
     uint32_t sh;
     auto_drive();
-    if (m < 0 || m >= MISSIONS) return;
+    if (m < 0 || (m >= MISSIONS && m != LAUNCH_CODE)) return;
     sh = shell_state();
     if (!sh) return;
     if (G32(sh + SHELL_FLAGS) & 5u) return;
     InterlockedExchange(&s_launch_req, -1);
+    if (m == LAUNCH_CODE) {
+        launch_apply_code(s_launch_code, 1);
+        return;
+    }
     if (level_is_mission(sh)) {
         fprintf(stderr, "[COOP] mission %s not loaded, a mission is already running\n", k_missions[m].code);
         return;
@@ -1519,7 +1534,7 @@ int avp_coop_marked(uint32_t handle)
 {
     uint32_t obj;
     int o, fs;
-    if (!coop_live()) return 0;
+    if (!coop_live() || s_vs) return 0;
     obj = cp_obj_of(handle);
     if (!obj || !(cp_class(G32(obj)) & CF_UNIT) || (cp_class(G32(obj)) & CF_STATIC) || is_hidden(handle)) return 0;
     o = owner_of(handle);

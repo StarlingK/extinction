@@ -73,3 +73,10 @@ recomp_0010.c	loc_0007F800	{ extern int avp_coop_mover_pre(uint32_t m); if (avp_
 recomp_0010.c	loc_000802B0	{ extern int avp_coop_mover_pre(uint32_t m); if (avp_coop_mover_pre(ecx)) { eax = 0; esp += 4; return; } }
 recomp_0018.c	loc_000D7270	{ extern int avp_coop_parent_bad(uint32_t obj); if (avp_coop_parent_bad(ecx)) { eax = 0; esp += 4; return; } }
 recomp_0010.c	loc_0007F964	{ extern int avp_coop_mover_spin(uint32_t m); if (avp_coop_mover_spin(esi)) goto loc_0007F9C0; }
+recomp_0013.c	loc_000A0310	{ extern int avp_skirmish_block_trig(void); if (avp_skirmish_block_trig()) { eax = 0; esp += 4; return; } }
+recomp_0000.c	loc_00017830	{ extern int avp_skirmish_skip_ai(uint32_t ai); if (avp_skirmish_skip_ai(ecx)) { esp += 4; return; } }
+recomp_0003.c	loc_0002EFF0	{ extern int avp_skirmish_hide_marker(uint32_t owner); if (avp_skirmish_hide_marker(MEM32(esp + 4))) { eax = 0; esp += 12; return; } }
+recomp_0023.c	loc_00134D10	{ extern void avp_prompts_begin(uint32_t, uint32_t); avp_prompts_begin(ecx, MEM32(esp + 4)); }
+recomp_0023.c	loc_00134F96	{ extern void avp_prompts_end(void); avp_prompts_end(); }
+recomp_0023.c	loc_00134FA3	{ extern void avp_prompts_end(void); avp_prompts_end(); }
+recomp_0005.c	loc_00055572	{ extern uint32_t avp_skirmish_decor_pending(void); uint32_t _dr = avp_skirmish_decor_pending(); if (_dr) { MEM32(esi + 0xF0) = _dr; MEM32(esi + 0x320) = 1; } }

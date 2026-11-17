@@ -264,25 +264,32 @@ fi
 cmake "${cmake_args[@]}" || die "CMake configuration failed"
 
 step "Compiling with $JOBS jobs"
-cmake --build "$BUILD_DIR" -j "$JOBS" --target extinction || die "the build failed"
+cmake --build "$BUILD_DIR" -j "$JOBS" --target extinction extinction_mp nostromo_editor || die "the build failed"
 
 step "Collecting the result"
 DIST="$ROOT/dist/$TARGET"
 mkdir -p "$DIST"
 if [ "$TARGET" = "windows" ]; then
-    built="$BUILD_DIR/extinction.exe"
-    final="$DIST/AvPExtinction.exe"
     strip_tool="x86_64-w64-mingw32-strip"
+    ext=".exe"
+    built_main="$BUILD_DIR/extinction.exe"
 else
-    built="$BUILD_DIR/AvPExtinction"
-    final="$DIST/AvPExtinction"
     strip_tool="strip"
+    ext=""
+    built_main="$BUILD_DIR/AvPExtinction"
 fi
-[ -f "$built" ] || die "the build finished but $built was not produced"
-cp -f "$built" "$final"
-if command -v "$strip_tool" >/dev/null 2>&1; then
-    "$strip_tool" "$final"
-fi
+for pair in "$built_main:AvPExtinction$ext" "$BUILD_DIR/AvPExtinctionMP$ext:AvPExtinctionMP$ext"; do
+    built="${pair%%:*}"
+    name="${pair##*:}"
+    [ -f "$built" ] || die "the build finished but $built was not produced"
+    cp -f "$built" "$DIST/$name"
+    if command -v "$strip_tool" >/dev/null 2>&1; then
+        "$strip_tool" "$DIST/$name"
+    fi
+done
+mkdir -p "$DIST/maps"
+cp -f "$ROOT/port/maps/"*.nmap "$ROOT/port/maps/"*.nterr "$DIST/maps/"
+final="$DIST/AvPExtinction$ext"
 echo
 echo "Done: $final"
 echo "SHA-256 $(sha256_of "$final")"

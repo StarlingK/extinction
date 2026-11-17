@@ -19,6 +19,7 @@ __attribute__((constructor)) static void avp_linux_vma(void) { setenv("RECOMP_EX
 #include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
+#include <ctype.h>
 #include <math.h>
 
 #include <xbox/xboxrecomp.h>
@@ -158,6 +159,7 @@ static DWORD WINAPI avp_pvideo_ack(LPVOID unused)
 #endif
 
 volatile uint32_t g_avp_xmv_obj;
+volatile int g_avp_guest_mapped;
 
 #ifdef _WIN32
 static int avp_has_foreground(void)
@@ -208,6 +210,12 @@ static DWORD WINAPI avp_movie_skip(LPVOID unused)
             fire = 1;
             since = GetTickCount64();
         }
+#if defined(AVP_MP_MODE)
+        if (o && since && GetTickCount64() - since >= 40) {
+            fire = 1;
+            since = GetTickCount64();
+        }
+#endif
         if (fire && o) {
             *(volatile uint8_t *)(uintptr_t)((ptrdiff_t)o + 0x78 + g_xbox_mem_offset) = 1;
             fprintf(stderr, "[AVP] movie skip: decoder 0x%08X told to stop\n", o);
@@ -793,6 +801,7 @@ static int avp_guest_run(void)
     }
 
     g_xbox_mem_offset = xbox_GetMemoryOffset();
+    g_avp_guest_mapped = 1;
     printf("Xbox memory mapped. Offset: 0x%llX\n", (unsigned long long)g_xbox_mem_offset);
     avp_log_setup();
     nv2a_hook_init(g_xbox_mem_offset);
@@ -897,6 +906,34 @@ static BOOL load_xbe(const char *path, void **out_data, size_t *out_size)
     return TRUE;
 }
 
+static void avp_mode_args(const char *cl)
+{
+    static const struct { const char *flag, *env; } k[] = {
+        { "--test-map", "AVP_TEST_MAP" }
+    };
+    size_t i;
+    for (i = 0; i < sizeof k / sizeof k[0]; i++) {
+        const char *p = strstr(cl, k[i].flag);
+        char v[40];
+        size_t n = 0;
+        if (!p)
+            continue;
+        p += strlen(k[i].flag);
+        while (*p == ' ' || *p == '"')
+            p++;
+        while (n < 32 && (isalnum((unsigned char)p[n]) || p[n] == '_' || p[n] == '-')) {
+            v[n] = p[n];
+            n++;
+        }
+        v[n] = 0;
+        if (n) {
+            char kv[80];
+            snprintf(kv, sizeof kv, "%s=%s", k[i].env, v);
+            _putenv(kv);
+        }
+    }
+}
+
 #ifdef _WIN32
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                    LPSTR lpCmdLine, int nCmdShow)
@@ -909,8 +946,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     {
         extern int avp_launcher_main(HINSTANCE inst, int show);
         const char *cl = GetCommandLineA();
+        avp_mode_args(cl);
+#if defined(AVP_MP_MODE)
+        {
+            extern void avp_launcher_env(void);
+            avp_launcher_env();
+        }
+#else
         if (!strstr(cl, "--play") && !strstr(cl, "--iso") && !getenv("AVP_NO_LAUNCHER"))
             return avp_launcher_main(GetModuleHandleA(NULL), nCmdShow ? nCmdShow : SW_SHOW);
+#endif
     }
 
     if (!avp_prepare())
@@ -965,6 +1010,14 @@ int main(int argc, char **argv)
     for (i = 1; i < argc; i++)
         if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h"))
             return avp_help();
+    {
+        char cl[512];
+        size_t used = 0;
+        cl[0] = 0;
+        for (i = 1; i < argc && used < sizeof cl - 64; i++)
+            used += (size_t)snprintf(cl + used, sizeof cl - used, "%s ", argv[i]);
+        avp_mode_args(cl);
+    }
     avp_setup_args(argc, argv);
     avp_default_env();
     if (!avp_prepare())

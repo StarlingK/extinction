@@ -2,6 +2,7 @@
 #define AVP_SKIRMISH_H
 
 #include <stdint.h>
+#include <stddef.h>
 #include "avp_layout.h"
 
 #define AVP_SKIRMISH_MAX_PLAYERS 8
@@ -20,12 +21,14 @@ typedef struct {
 
 typedef struct {
     char map[16];
+    char nmap[32];
     int nplayers;
     AvpSkirmishPlayer player[AVP_SKIRMISH_MAX_PLAYERS];
 } AvpSkirmishCfg;
 
 int  avp_skirmish_config_load(AvpSkirmishCfg *c);
 int  avp_skirmish_config_save(const AvpSkirmishCfg *c);
+void avp_skirmish_pick_code(AvpSkirmishCfg *c);
 void avp_skirmish_arm(int editor);
 void avp_skirmish_disarm(void);
 int  avp_skirmish_armed(void);
@@ -35,10 +38,21 @@ const char *avp_skirmish_cur_map(void);
 void avp_skirmish_capture(const uint32_t *rgb, int w, int h);
 int  avp_skirmish_thumb_load(const char *code, uint32_t *px);
 int  avp_skirmish_block(uint32_t fn);
+int  avp_skirmish_block_trig(void);
+int  avp_skirmish_skip_ai(uint32_t ai);
+int  avp_skirmish_hide_marker(uint32_t owner);
+int  avp_skirmish_pack(char *buf, size_t cap);
+int  avp_skirmish_unpack(const char *buf, size_t n);
+const char *avp_skirmish_nmap(void);
 void avp_skirmish_level(uint32_t name);
 void avp_skirmish_fill_trace(uint32_t name);
+void avp_skirmish_ally_all(uint32_t h);
+int  avp_skirmish_game_slot(int cfg_slot);
+uint32_t avp_skirmish_fill_exists(const char *fill);
 uint32_t avp_skirmish_spawn(const char *cls, int slot, float x, float y, float z, float rot);
 void avp_skirmish_mission_start(void);
+void avp_skirmish_frame(void);
+uint32_t avp_skirmish_decor_pending(void);
 void avp_skirmish_tick(void);
 void avp_skirmish_draw(uint32_t *rgb, int w, int h);
 
